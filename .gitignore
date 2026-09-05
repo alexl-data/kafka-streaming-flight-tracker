@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+
+# Spark
+spark-warehouse/
+checkpoints/
+derby.log
+metastore_db/
+
+# Data (nicht versionieren, nur Code)
+data/
+*.parquet
+*.avro
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

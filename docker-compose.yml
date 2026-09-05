@@ -1,0 +1,57 @@
+services:
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    hostname: kafka
+    container_name: kafka
+    ports:
+      - "9092:9092"
+    environment:
+      # KRaft mode: Kafka no longer needs Zookeeper (the recommended default
+      # since Kafka 3.x). This single container acts as both broker and
+      # controller ("combined mode") - sufficient for local development; in
+      # production you would separate the broker and controller roles.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+
+      # Two listeners: one for communication inside the Docker network
+      # (other containers like Spark/producer reach it at "kafka:29092"),
+      # and one for access from the host machine (Python code running
+      # outside Docker reaches it at "localhost:9092").
+      KAFKA_LISTENERS: PLAINTEXT://kafka:29092,CONTROLLER://kafka:29093,PLAINTEXT_HOST://0.0.0.0:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+
+      # For a single-broker cluster the replication factor must be 1
+      # (you can't have more copies than there are brokers).
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+      # Deliberately disabled: topics should be created explicitly with a
+      # deliberate partition count, not implicitly on first write with some
+      # arbitrary default configuration.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:v0.7.2
+    container_name: kafka-ui
+    ports:
+      - "8081:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+volumes:
+  kafka-data:
