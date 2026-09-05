@@ -93,7 +93,7 @@ incurring permanent infrastructure cost for a demo.
 ## Roadmap / Commit Phases
 
 - [x] Phase 0 – Repo scaffold, Kafka (KRaft) + Kafka UI via Docker Compose
-- [ ] Phase 1 – Kafka fundamentals: simple JSON producer/consumer,
+- [x] Phase 1 – Kafka fundamentals: simple JSON producer/consumer,
       consumer group demo (2 instances), explicit topic creation with
       partitioning
 - [ ] Phase 2 – Schema Registry + Avro, first schema evolution
@@ -108,11 +108,38 @@ incurring permanent infrastructure cost for a demo.
 - [ ] Phase 9 – CD: image build & push to GHCR
 - [ ] Phase 10 – Live map, README/architecture docs, polish
 
-## Setup (as of Phase 0)
+## Setup (as of Phase 1)
 
 ```bash
 docker compose up -d
+python -m venv .venv
+.venv\Scripts\activate       # Windows
+pip install -r requirements.txt
 ```
 
 - Kafka broker: `localhost:9092`
 - Kafka UI: [http://localhost:8081](http://localhost:8081)
+
+### Kafka Fundamentals Demo
+
+The `flights.raw` topic is created explicitly (not auto-created) with 6
+partitions:
+
+```bash
+docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
+  --create --topic flights.raw --partitions 6 --replication-factor 1
+```
+
+`producer/produce_demo.py` sends synthetic test events keyed by a `region`
+field (a stand-in for the real geographic region used once OpenSky data
+lands in Phase 2), to make partitioning and key-based ordering observable
+without depending on the external API yet.
+
+`consumer/consume_demo.py` reads them back. Running two instances at once
+with the same consumer group ID (`demo-consumer-group`) demonstrates Kafka
+splitting the topic's 6 partitions between them:
+
+```bash
+python producer/produce_demo.py
+python consumer/consume_demo.py   # run in two terminals to see the group rebalance
+```

@@ -16,6 +16,8 @@ data/
 *.parquet
 *.avro
 
+*.log
+
 # IDE
 .vscode/
 .idea/
