@@ -1,6 +1,7 @@
 """
 Minimal Kafka consumer used to learn the basics: reading messages, consumer
-groups, and offset management.
+groups, and offset management. Separate from the real pipeline
+(`consume_flights.py`, topic `flights.raw`) - see produce_demo.py for why.
 
 Run two instances of this script at once (same GROUP_ID) to see Kafka split
 the topic's partitions between them, and reassign them when one instance
@@ -13,7 +14,7 @@ import json
 from confluent_kafka import Consumer
 
 BOOTSTRAP_SERVERS = "localhost:9092"
-TOPIC = "flights.raw"
+TOPIC = "demo.events"
 GROUP_ID = "demo-consumer-group"
 
 

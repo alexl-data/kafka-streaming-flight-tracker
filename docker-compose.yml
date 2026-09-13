@@ -41,17 +41,46 @@ services:
       timeout: 10s
       retries: 5
 
+  schema-registry:
+    image: confluentinc/cp-schema-registry:7.6.1
+    hostname: schema-registry
+    container_name: schema-registry
+    ports:
+      # Default Schema Registry port (8081) is already taken by kafka-ui's
+      # host mapping (see comment there), so only the host-side port is
+      # remapped to 8082 - inside the Docker network it's still reachable
+      # at schema-registry:8081, same PLAINTEXT_HOST-style pattern as Kafka.
+      - "8082:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      # Schema Registry isn't a separate database - it stores every
+      # registered schema as a message in an internal Kafka topic
+      # (_schemas), so it needs its own Kafka connection just like a
+      # regular producer/consumer would.
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      SCHEMA_REGISTRY_KAFKASTORE_SECURITY_PROTOCOL: PLAINTEXT
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   kafka-ui:
     image: provectuslabs/kafka-ui:v0.7.2
     container_name: kafka-ui
     ports:
+      # Default would be 8080, but that's already taken by a container from
+      # another project on this machine (see README) - not a Kafka-specific
+      # concern, just a local port conflict.
       - "8081:8080"
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
     depends_on:
       kafka:
         condition: service_healthy
+      schema-registry:
+        condition: service_started
 
 volumes:
   kafka-data:

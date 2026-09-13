@@ -97,7 +97,8 @@ incurring permanent infrastructure cost for a demo.
       consumer group demo (2 instances), explicit topic creation with
       partitioning
 - [x] Phase 2a – Live data source: OpenSky Network producer (DACH bounding box)
-- [ ] Phase 2b – Schema Registry + Avro, first schema evolution
+- [x] Phase 2b – Schema Registry + Avro serialization for the real pipeline
+- [ ] Phase 2c – First schema evolution
 - [ ] Phase 3 – Error handling: dead-letter topic
 - [ ] Phase 4 – Spark Structured Streaming: Kafka source, Avro
       deserialization, checkpointing
@@ -109,7 +110,7 @@ incurring permanent infrastructure cost for a demo.
 - [ ] Phase 9 – CD: image build & push to GHCR
 - [ ] Phase 10 – Live map, README/architecture docs, polish
 
-## Setup (as of Phase 1)
+## Setup (as of Phase 2b)
 
 ```bash
 docker compose up -d
@@ -120,17 +121,25 @@ pip install -r requirements.txt
 
 - Kafka broker: `localhost:9092`
 - Kafka UI: [http://localhost:8081](http://localhost:8081)
+- Schema Registry: [http://localhost:8082](http://localhost:8082)
 
 ### Kafka Fundamentals Demo
 
-The `flights.raw` topic is created explicitly (not auto-created) with 4
-partitions - matching the number of distinct region keys the producers use
-(see below), so each partition maps to roughly one region instead of a
-handful of partitions sitting empty:
+Kept as a standalone reference example, deliberately separate from the real
+pipeline: a minimal, JSON-only producer/consumer pair for learning Kafka's
+core mechanics (producing, partitioning, consumer groups, offsets) without
+the added complexity of Avro or an external API. It uses its own topic,
+`demo.events`, so it can never end up mixing synthetic test events with
+real flight data in the same topic.
+
+The topic is created explicitly (not auto-created) with 4 partitions -
+matching the number of distinct region keys the demo producer uses, so
+each partition maps to roughly one region instead of a handful of
+partitions sitting empty:
 
 ```bash
 docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
-  --create --topic flights.raw --partitions 4 --replication-factor 1
+  --create --topic demo.events --partitions 4 --replication-factor 1
 ```
 
 `producer/produce_demo.py` sends synthetic test events keyed by a `region`
@@ -150,10 +159,13 @@ python consumer/consume_demo.py   # run in two terminals to see the group rebala
 
 `producer/flights_producer.py` polls the real OpenSky Network API (DACH
 bounding box: Germany, Austria, Switzerland) and publishes actual aircraft
-positions, keyed by a coarse geographic quadrant (`nw`/`ne`/`sw`/`se`):
+positions, keyed by a coarse geographic quadrant (`nw`/`ne`/`sw`/`se`).
+Each event is Avro-serialized against `schemas/flight_state.avsc`, with the
+schema registered in Schema Registry under the subject `flights.raw-value`:
 
 ```bash
 python producer/flights_producer.py
+python consumer/consume_flights.py   # Avro-aware consumer for flights.raw
 ```
 
 Anonymous API access is capped at 400 requests/day - fine for a short demo

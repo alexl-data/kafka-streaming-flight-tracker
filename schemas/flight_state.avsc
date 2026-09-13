@@ -1,0 +1,26 @@
+{
+  "type": "record",
+  "name": "FlightState",
+  "namespace": "com.portfolio.flights",
+  "doc": "One OpenSky state vector (aircraft position report), enriched with a derived region key.",
+  "fields": [
+    {"name": "icao24", "type": "string", "doc": "Unique 24-bit ICAO transponder address, always present."},
+    {"name": "callsign", "type": ["null", "string"], "default": null},
+    {"name": "origin_country", "type": "string"},
+    {"name": "time_position", "type": ["null", "long"], "default": null},
+    {"name": "last_contact", "type": ["null", "long"], "default": null},
+    {"name": "longitude", "type": ["null", "double"], "default": null},
+    {"name": "latitude", "type": ["null", "double"], "default": null},
+    {"name": "baro_altitude", "type": ["null", "double"], "default": null},
+    {"name": "on_ground", "type": "boolean"},
+    {"name": "velocity", "type": ["null", "double"], "default": null},
+    {"name": "true_track", "type": ["null", "double"], "default": null},
+    {"name": "vertical_rate", "type": ["null", "double"], "default": null},
+    {"name": "geo_altitude", "type": ["null", "double"], "default": null},
+    {"name": "squawk", "type": ["null", "string"], "default": null},
+    {"name": "spi", "type": "boolean"},
+    {"name": "position_source", "type": ["null", "int"], "default": null},
+    {"name": "category", "type": ["null", "int"], "default": null},
+    {"name": "region", "type": "string", "doc": "Derived quadrant of the polled bounding box (nw/ne/sw/se), not part of the raw OpenSky response."}
+  ]
+}

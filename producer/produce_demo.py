@@ -1,10 +1,11 @@
 """
-Minimal Kafka producer used to learn the basics before wiring up the real
-OpenSky data source in a later phase (see README roadmap, Phase 2).
+Minimal Kafka producer used to learn the basics: producing, partitioning,
+consumer groups. Separate from the real pipeline (`flights_producer.py`,
+topic `flights.raw`) so this reference example never mixes its synthetic
+JSON events with the real Avro-serialized flight data.
 
-Sends a handful of synthetic events to the `flights.raw` topic, using a
-`region` field as the partition key - a stand-in for the real geographic
-region we'll derive from actual flight positions later.
+Sends a handful of synthetic events to the `demo.events` topic, using a
+`region` field as the partition key.
 """
 
 import json
@@ -14,7 +15,7 @@ import time
 from confluent_kafka import Producer
 
 BOOTSTRAP_SERVERS = "localhost:9092"
-TOPIC = "flights.raw"
+TOPIC = "demo.events"
 REGIONS = ["north", "south", "east", "west"]
 
 

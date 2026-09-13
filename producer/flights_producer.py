@@ -1,7 +1,9 @@
 """
 Producer that polls the OpenSky Network REST API for live aircraft state
 vectors over a bounding box (DACH region: Germany, Austria, Switzerland)
-and publishes each one as a JSON event to the `flights.raw` Kafka topic.
+and publishes each one as an Avro-serialized event to the `flights.raw`
+Kafka topic, using the schema in schemas/flight_state.avsc registered in
+Schema Registry.
 
 Data source: https://opensky-network.org/api/states/all (anonymous access,
 no authentication required). Anonymous access is capped at 400 API credits
@@ -15,15 +17,22 @@ the bounding box (nw/ne/sw/se) and used as the Kafka partition key - a real
 stand-in for the random `region` key used in produce_demo.py.
 """
 
-import json
 import time
+from pathlib import Path
 
 import requests
-from confluent_kafka import Producer
+from confluent_kafka import SerializingProducer
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroSerializer
+from confluent_kafka.serialization import StringSerializer
 
 BOOTSTRAP_SERVERS = "localhost:9092"
+# Host-side port for Schema Registry - see the port comment in
+# docker-compose.yml for why it's 8082 instead of the 8081 default.
+SCHEMA_REGISTRY_URL = "http://localhost:8082"
 TOPIC = "flights.raw"
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
+SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "flight_state.avsc"
 
 # Bounding box covering Germany, Austria, and Switzerland (DACH region).
 BBOX = {"lamin": 45.8, "lomin": 5.9, "lamax": 55.1, "lomax": 17.2}
@@ -63,8 +72,26 @@ def fetch_states():
     return response.json().get("states") or []
 
 
+def build_producer():
+    schema_registry_client = SchemaRegistryClient({"url": SCHEMA_REGISTRY_URL})
+    # AvroSerializer needs the writer schema up front (unlike the consumer
+    # side - see consume_flights.py) and registers it with Schema Registry
+    # on first use if it isn't already registered there.
+    avro_serializer = AvroSerializer(
+        schema_registry_client,
+        SCHEMA_PATH.read_text(),
+    )
+    return SerializingProducer(
+        {
+            "bootstrap.servers": BOOTSTRAP_SERVERS,
+            "key.serializer": StringSerializer("utf_8"),
+            "value.serializer": avro_serializer,
+        }
+    )
+
+
 def main():
-    producer = Producer({"bootstrap.servers": BOOTSTRAP_SERVERS})
+    producer = build_producer()
 
     try:
         while True:
@@ -81,12 +108,18 @@ def main():
                 if record["latitude"] is None or record["longitude"] is None:
                     continue  # aircraft currently without a position fix
 
-                region = region_for(record["latitude"], record["longitude"])
+                record.pop("sensors", None)  # not part of flight_state.avsc
+                record["region"] = region_for(record["latitude"], record["longitude"])
+
+                # SerializingProducer runs `record` through the configured
+                # key/value serializers itself - no manual json.dumps() or
+                # Avro encoding here, unlike the plain Producer in
+                # produce_demo.py.
                 producer.produce(
                     topic=TOPIC,
-                    key=region,
-                    value=json.dumps(record),
-                    callback=delivery_report,
+                    key=record["region"],
+                    value=record,
+                    on_delivery=delivery_report,
                 )
                 sent += 1
 
