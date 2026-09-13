@@ -96,7 +96,8 @@ incurring permanent infrastructure cost for a demo.
 - [x] Phase 1 – Kafka fundamentals: simple JSON producer/consumer,
       consumer group demo (2 instances), explicit topic creation with
       partitioning
-- [ ] Phase 2 – Schema Registry + Avro, first schema evolution
+- [x] Phase 2a – Live data source: OpenSky Network producer (DACH bounding box)
+- [ ] Phase 2b – Schema Registry + Avro, first schema evolution
 - [ ] Phase 3 – Error handling: dead-letter topic
 - [ ] Phase 4 – Spark Structured Streaming: Kafka source, Avro
       deserialization, checkpointing
@@ -122,24 +123,38 @@ pip install -r requirements.txt
 
 ### Kafka Fundamentals Demo
 
-The `flights.raw` topic is created explicitly (not auto-created) with 6
-partitions:
+The `flights.raw` topic is created explicitly (not auto-created) with 4
+partitions - matching the number of distinct region keys the producers use
+(see below), so each partition maps to roughly one region instead of a
+handful of partitions sitting empty:
 
 ```bash
 docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
-  --create --topic flights.raw --partitions 6 --replication-factor 1
+  --create --topic flights.raw --partitions 4 --replication-factor 1
 ```
 
 `producer/produce_demo.py` sends synthetic test events keyed by a `region`
-field (a stand-in for the real geographic region used once OpenSky data
-lands in Phase 2), to make partitioning and key-based ordering observable
-without depending on the external API yet.
+field, to make partitioning and key-based ordering observable without
+depending on the external API.
 
 `consumer/consume_demo.py` reads them back. Running two instances at once
 with the same consumer group ID (`demo-consumer-group`) demonstrates Kafka
-splitting the topic's 6 partitions between them:
+splitting the topic's 4 partitions between them:
 
 ```bash
 python producer/produce_demo.py
 python consumer/consume_demo.py   # run in two terminals to see the group rebalance
 ```
+
+### Live Flight Data
+
+`producer/flights_producer.py` polls the real OpenSky Network API (DACH
+bounding box: Germany, Austria, Switzerland) and publishes actual aircraft
+positions, keyed by a coarse geographic quadrant (`nw`/`ne`/`sw`/`se`):
+
+```bash
+python producer/flights_producer.py
+```
+
+Anonymous API access is capped at 400 requests/day - fine for a short demo
+run, not for continuous operation (see comments in the script).
