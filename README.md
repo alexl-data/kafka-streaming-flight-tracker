@@ -98,7 +98,7 @@ incurring permanent infrastructure cost for a demo.
       partitioning
 - [x] Phase 2a – Live data source: OpenSky Network producer (DACH bounding box)
 - [x] Phase 2b – Schema Registry + Avro serialization for the real pipeline
-- [ ] Phase 2c – First schema evolution
+- [x] Phase 2c – First schema evolution
 - [ ] Phase 3 – Error handling: dead-letter topic
 - [ ] Phase 4 – Spark Structured Streaming: Kafka source, Avro
       deserialization, checkpointing
@@ -170,3 +170,29 @@ python consumer/consume_flights.py   # Avro-aware consumer for flights.raw
 
 Anonymous API access is capped at 400 requests/day - fine for a short demo
 run, not for continuous operation (see comments in the script).
+
+### Schema Evolution
+
+Schema Registry's default compatibility mode is `BACKWARD`: a new schema
+must be able to read data written with the previous schema. Verified two
+ways:
+
+- **Compatible change:** added `ingested_at` (nullable, `default: null`) to
+  `flight_state.avsc`. Registered automatically as schema v2 on the next
+  producer run. A fresh consumer group reading `flights.raw` from the
+  beginning correctly read all 3000 sampled messages across both versions
+  (2477 v1 messages without the field, 523 v2 messages with it) in a
+  single run, using the same `AvroDeserializer`.
+- **Incompatible change:** attempted to register a schema with a new
+  *required* field (no default). Schema Registry rejected it - both the
+  compatibility check (`is_compatible: false`) and the actual registration
+  attempt (`HTTP 409`, `READER_FIELD_MISSING_DEFAULT_VALUE`, pointing at
+  the exact field). Nothing was written; `flights.raw-value` still has
+  exactly versions `[1, 2]`. This is the same check Phase 8's CI pipeline
+  will run automatically before a merge.
+
+Note: the Schema Registry rejection above only fires when a schema is
+*registered*. If producer code adds a dict key that was never added to the
+`.avsc` file, Avro serialization doesn't error - it silently drops any
+field not defined in the schema. The schema controls what actually gets
+written, not the Python dict.

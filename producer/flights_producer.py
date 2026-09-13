@@ -110,6 +110,10 @@ def main():
 
                 record.pop("sensors", None)  # not part of flight_state.avsc
                 record["region"] = region_for(record["latitude"], record["longitude"])
+                # Schema v2 field (see schemas/flight_state.avsc) - when our
+                # producer processed this record, as opposed to OpenSky's
+                # own last_contact timestamp.
+                record["ingested_at"] = int(time.time() * 1000)
 
                 # SerializingProducer runs `record` through the configured
                 # key/value serializers itself - no manual json.dumps() or
