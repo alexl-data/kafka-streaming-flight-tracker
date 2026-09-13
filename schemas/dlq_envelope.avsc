@@ -1,0 +1,17 @@
+{
+  "type": "record",
+  "name": "DlqEnvelope",
+  "namespace": "com.portfolio.flights",
+  "doc": "Uniform wrapper for anything routed to a dead-letter topic, regardless of whether the failure happened on the producer or consumer side. The original payload is kept as an opaque byte blob - this envelope only standardizes the metadata around it.",
+  "fields": [
+    {"name": "stage", "type": "string", "doc": "Where the failure was caught: 'producer' or 'consumer'."},
+    {"name": "error", "type": "string"},
+    {"name": "error_type", "type": "string"},
+    {"name": "source_topic", "type": "string"},
+    {"name": "source_partition", "type": ["null", "int"], "default": null, "doc": "Null for a producer-side failure - the record never reached a partition."},
+    {"name": "source_offset", "type": ["null", "long"], "default": null, "doc": "Null for a producer-side failure - the record never got an offset."},
+    {"name": "failed_at", "type": "long", "doc": "Epoch milliseconds when the failure was caught."},
+    {"name": "original_key", "type": ["null", "string"], "default": null},
+    {"name": "original_value", "type": "bytes", "doc": "The payload that failed, untouched. For a consumer-side failure this is the raw undecoded bytes; for a producer-side failure (never successfully serialized) this is the JSON-encoded form of the attempted record instead."}
+  ]
+}

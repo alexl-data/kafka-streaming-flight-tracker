@@ -15,13 +15,22 @@ work.
 Each aircraft's position is bucketed into one of four coarse quadrants of
 the bounding box (nw/ne/sw/se) and used as the Kafka partition key - a real
 stand-in for the random `region` key used in produce_demo.py.
+
+A record that fails Avro serialization (e.g. a required field missing
+because OpenSky's response was incomplete) is routed to the
+`flights.raw.dlq` topic instead of crashing the producer, wrapped in the
+same DlqEnvelope schema (schemas/dlq_envelope.avsc) that consume_flights.py
+uses for its own failures - one consistent shape for the DLQ topic,
+regardless of which side caught the problem.
 """
 
+import json
 import time
 from pathlib import Path
 
 import requests
 from confluent_kafka import SerializingProducer
+from confluent_kafka.error import KeySerializationError, ValueSerializationError
 from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.serialization import StringSerializer
@@ -31,8 +40,11 @@ BOOTSTRAP_SERVERS = "localhost:9092"
 # docker-compose.yml for why it's 8082 instead of the 8081 default.
 SCHEMA_REGISTRY_URL = "http://localhost:8082"
 TOPIC = "flights.raw"
+DLQ_TOPIC = "flights.raw.dlq"
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
-SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "flight_state.avsc"
+SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
+SCHEMA_PATH = SCHEMAS_DIR / "flight_state.avsc"
+DLQ_SCHEMA_PATH = SCHEMAS_DIR / "dlq_envelope.avsc"
 
 # Bounding box covering Germany, Austria, and Switzerland (DACH region).
 BBOX = {"lamin": 45.8, "lomin": 5.9, "lamax": 55.1, "lomax": 17.2}
@@ -72,8 +84,7 @@ def fetch_states():
     return response.json().get("states") or []
 
 
-def build_producer():
-    schema_registry_client = SchemaRegistryClient({"url": SCHEMA_REGISTRY_URL})
+def build_producer(schema_registry_client):
     # AvroSerializer needs the writer schema up front (unlike the consumer
     # side - see consume_flights.py) and registers it with Schema Registry
     # on first use if it isn't already registered there.
@@ -90,8 +101,40 @@ def build_producer():
     )
 
 
+def build_dlq_producer(schema_registry_client):
+    # Same envelope schema consume_flights.py's DLQ path uses - see
+    # schemas/dlq_envelope.avsc. One shared SchemaRegistryClient instance
+    # is fine to reuse across serializers for different schemas/subjects.
+    avro_serializer = AvroSerializer(schema_registry_client, DLQ_SCHEMA_PATH.read_text())
+    return SerializingProducer(
+        {
+            "bootstrap.servers": BOOTSTRAP_SERVERS,
+            "value.serializer": avro_serializer,
+        }
+    )
+
+
+def send_to_dlq(dlq_producer, record, exc):
+    envelope = {
+        "stage": "producer",
+        "error": str(exc),
+        "error_type": type(exc).__name__,
+        "source_topic": TOPIC,
+        "source_partition": None,  # never reached a partition - produce() failed
+        "source_offset": None,
+        "failed_at": int(time.time() * 1000),
+        "original_key": record.get("region"),
+        # The record was never successfully Avro-serialized, so its JSON
+        # form is the closest thing to "the original payload" we have.
+        "original_value": json.dumps(record, default=str).encode("utf-8"),
+    }
+    dlq_producer.produce(topic=DLQ_TOPIC, value=envelope)
+
+
 def main():
-    producer = build_producer()
+    schema_registry_client = SchemaRegistryClient({"url": SCHEMA_REGISTRY_URL})
+    producer = build_producer(schema_registry_client)
+    dlq_producer = build_dlq_producer(schema_registry_client)
 
     try:
         while True:
@@ -118,22 +161,32 @@ def main():
                 # SerializingProducer runs `record` through the configured
                 # key/value serializers itself - no manual json.dumps() or
                 # Avro encoding here, unlike the plain Producer in
-                # produce_demo.py.
-                producer.produce(
-                    topic=TOPIC,
-                    key=record["region"],
-                    value=record,
-                    on_delivery=delivery_report,
-                )
-                sent += 1
+                # produce_demo.py. That serialization happens synchronously,
+                # right here in produce() - so a malformed record (e.g. a
+                # required field missing because OpenSky's response was
+                # incomplete) raises immediately, not asynchronously via
+                # the delivery callback.
+                try:
+                    producer.produce(
+                        topic=TOPIC,
+                        key=record["region"],
+                        value=record,
+                        on_delivery=delivery_report,
+                    )
+                    sent += 1
+                except (ValueSerializationError, KeySerializationError) as exc:
+                    print(f"Serialization failed, routing to DLQ: {exc}")
+                    send_to_dlq(dlq_producer, record, exc)
 
             producer.poll(0)
+            dlq_producer.poll(0)
             print(f"Polled {len(states)} aircraft, published {sent} events")
             time.sleep(POLL_INTERVAL_SECONDS)
     except KeyboardInterrupt:
         pass
     finally:
         producer.flush()
+        dlq_producer.flush()
 
 
 if __name__ == "__main__":

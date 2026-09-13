@@ -99,7 +99,7 @@ incurring permanent infrastructure cost for a demo.
 - [x] Phase 2a – Live data source: OpenSky Network producer (DACH bounding box)
 - [x] Phase 2b – Schema Registry + Avro serialization for the real pipeline
 - [x] Phase 2c – First schema evolution
-- [ ] Phase 3 – Error handling: dead-letter topic
+- [x] Phase 3 – Error handling: dead-letter topic
 - [ ] Phase 4 – Spark Structured Streaming: Kafka source, Avro
       deserialization, checkpointing
 - [ ] Phase 5 – Windowing/watermarking: tumbling window aggregation,
@@ -196,3 +196,41 @@ Note: the Schema Registry rejection above only fires when a schema is
 `.avsc` file, Avro serialization doesn't error - it silently drops any
 field not defined in the schema. The schema controls what actually gets
 written, not the Python dict.
+
+### Error Handling
+
+A single malformed record shouldn't crash a producer or consumer that's
+otherwise processing thousands of good ones. Both sides route failures to
+`flights.raw.dlq` (1 partition - DLQ volume is expected to stay low,
+unlike `flights.raw`'s partitioning-by-key-cardinality reasoning) instead
+of stopping or silently dropping the message.
+
+Both failure paths write the **same** `DlqEnvelope` schema
+(`schemas/dlq_envelope.avsc`), registered in Schema Registry like any
+other topic - an earlier version of this had the producer write plain
+JSON and the consumer write raw bytes with error details in Kafka headers,
+which meant `flights.raw.dlq` mixed two incompatible shapes in one topic,
+the exact problem `flights.raw`'s single-format rule was meant to avoid.
+The envelope keeps the original failed payload as an opaque `bytes` field
+and standardizes only the metadata around it (`stage`, `error`,
+`error_type`, `source_topic`/`partition`/`offset`, `failed_at`):
+
+- **Producer:** if a record is missing a required field (e.g. an
+  incomplete OpenSky response), Avro serialization raises
+  `ValueSerializationError` synchronously inside `produce()`. Caught
+  per-record; the record's JSON form (it never became valid Avro) is
+  wrapped in the envelope with `stage: "producer"` and no
+  partition/offset (it never reached one). Verified by injecting a record
+  missing `icao24`.
+- **Consumer:** switched from `DeserializingConsumer` to a plain
+  `Consumer` with a manually invoked `AvroDeserializer`, specifically to
+  keep access to the raw undecoded bytes on failure (the deserializing
+  variant raises out of `poll()` without exposing them). A message that
+  fails to decode is wrapped in the same envelope with `stage: "consumer"`
+  and its source partition/offset, original bytes untouched. Verified by
+  producing deliberately invalid bytes to `flights.raw` and confirming the
+  consumer caught `Invalid magic byte` and forwarded it correctly.
+
+A single DLQ-reading consumer can therefore deserialize every entry the
+same way regardless of which side produced it - confirmed by reading both
+test entries above back with one shared `AvroDeserializer`.
