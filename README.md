@@ -75,8 +75,8 @@ Monitoring: Kafka UI (topics, schemas, consumer lag)
 - **Kafka** (KRaft mode, `confluentinc/cp-kafka`) – central message broker
 - **Schema Registry** (Confluent, Avro) – schema evolution, compatibility checks
 - **Kafka UI** – inspect topics, schemas, consumer lag visually
-- **Spark Structured Streaming** (open-source PySpark, self-operated via
-  Docker, no managed service) – compute layer for stream processing
+- **Spark Structured Streaming** (open-source PySpark, run locally via
+  `spark-submit`, no managed service) – compute layer for stream processing
 - **ClickHouse** – sink for aggregations (Gold layer, serving for the live map)
 - **GitHub Actions** – CI (tests, schema compatibility checks) and CD
   (Docker image build & push to GHCR)
@@ -100,7 +100,7 @@ incurring permanent infrastructure cost for a demo.
 - [x] Phase 2b – Schema Registry + Avro serialization for the real pipeline
 - [x] Phase 2c – First schema evolution
 - [x] Phase 3 – Error handling: dead-letter topic
-- [ ] Phase 4 – Spark Structured Streaming: Kafka source, Avro
+- [x] Phase 4 – Spark Structured Streaming: Kafka source, Avro
       deserialization, checkpointing
 - [ ] Phase 5 – Windowing/watermarking: tumbling window aggregation,
       handling late events
@@ -110,7 +110,7 @@ incurring permanent infrastructure cost for a demo.
 - [ ] Phase 9 – CD: image build & push to GHCR
 - [ ] Phase 10 – Live map, README/architecture docs, polish
 
-## Setup (as of Phase 2b)
+## Setup (as of Phase 4)
 
 ```bash
 docker compose up -d
@@ -122,6 +122,19 @@ pip install -r requirements.txt
 - Kafka broker: `localhost:9092`
 - Kafka UI: [http://localhost:8081](http://localhost:8081)
 - Schema Registry: [http://localhost:8082](http://localhost:8082)
+
+### Additional Prerequisites for Spark (Phase 4+)
+
+PySpark needs a JVM - not installed by `pip`:
+
+- **Java 17** (e.g. [Eclipse Temurin](https://adoptium.net/)), with `JAVA_HOME` pointing at the install directory.
+- **Windows only:** Spark's local filesystem operations go through Hadoop's
+  `FileUtil`, which needs `winutils.exe` even for a purely local job with no
+  HDFS involved - without it, Spark fails at startup with
+  `HADOOP_HOME and hadoop.home.dir are unset`. Download `winutils.exe` and
+  `hadoop.dll` for a Hadoop 3.3.x build (e.g. from
+  [cdarlint/winutils](https://github.com/cdarlint/winutils)) into a
+  `bin/` folder, and set `HADOOP_HOME` to its parent directory.
 
 ### Kafka Fundamentals Demo
 
@@ -170,6 +183,34 @@ python consumer/consume_flights.py   # Avro-aware consumer for flights.raw
 
 Anonymous API access is capped at 400 requests/day - fine for a short demo
 run, not for continuous operation (see comments in the script).
+
+### Spark Structured Streaming
+
+`spark/flights_stream.py` reads `flights.raw`, deserializes the Avro
+payload, and prints the parsed rows to the console - scope is deliberately
+limited to Kafka source + Avro deserialization + checkpointing; windowed
+aggregations and a real sink come in later phases. Must run via
+`spark-submit` (not plain `python`) so the Kafka/Avro connector packages
+resolve onto the classpath:
+
+```bash
+spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0,org.apache.spark:spark-avro_2.13:4.2.0 spark/flights_stream.py
+```
+
+Two things worth calling out:
+
+- **No Schema Registry integration in open-source Spark.** Unlike
+  Databricks Runtime, plain Spark's `from_avro()` doesn't know how to talk
+  to a Schema Registry or parse Confluent's wire format. The job fetches
+  the current schema once via REST at startup and manually strips the
+  5-byte magic-byte-plus-schema-ID header from each message before
+  `from_avro()` can parse it. Reads `startingOffsets: latest` rather than
+  `earliest`, since `from_avro()`'s single fixed schema can't decode
+  `flights.raw`'s older schema v1 records (see Schema Evolution below).
+- **Checkpointing verified across restarts.** Stopped the job mid-stream
+  and restarted it against the same `checkpoints/flights_stream`
+  directory - it resumed exactly where it left off, with no gap and no
+  reprocessing of already-seen messages.
 
 ### Schema Evolution
 
