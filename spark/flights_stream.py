@@ -1,10 +1,8 @@
 """
-First Spark Structured Streaming job: reads Avro-serialized events from
-`flights.raw` and prints them to the console.
-
-Scope is deliberately narrow - Kafka source, Avro deserialization, and
-checkpointing only. Windowed aggregations come in Phase 5, a real sink
-(ClickHouse) in Phase 6.
+Spark Structured Streaming job: reads Avro-serialized events from
+`flights.raw`, aggregates flight counts and average altitude per region
+in 1-minute tumbling windows, and prints the running results to the
+console. A real sink (ClickHouse) comes in Phase 6.
 
 Must be launched with spark-submit, not plain `python`, so the Kafka and
 Avro connector packages (and their transitive dependencies) get resolved
@@ -22,17 +20,30 @@ decodes against one fixed schema, and `flights.raw` has a mix of schema v1
 and v2 messages (see README, Schema Evolution) that a single schema can't
 both decode. Starting from "latest" reads only messages produced under the
 current schema.
+
+Windowing uses `time_position` (when OpenSky recorded the position) as
+event time, not `ingested_at` (when our producer processed the record) -
+the two diverge whenever a batch arrives late or out of order, which is
+exactly what the watermark below needs to reason about.
+
+The checkpoint directory is separate from the earlier unwindowed version
+of this job: a checkpoint is tied to the shape of the specific streaming
+query that created it (stateless passthrough vs. stateful windowed
+aggregation are different query plans), not just to the source topic, so
+reusing the old checkpoint here would fail to resume correctly.
 """
 
 import requests
 from pyspark.sql import SparkSession
 from pyspark.sql.avro.functions import from_avro
-from pyspark.sql.functions import expr
+from pyspark.sql.functions import avg, coalesce, col, count, expr, window
 
 BOOTSTRAP_SERVERS = "localhost:9092"
 SCHEMA_REGISTRY_URL = "http://localhost:8082"
 TOPIC = "flights.raw"
-CHECKPOINT_LOCATION = "checkpoints/flights_stream"
+CHECKPOINT_LOCATION = "checkpoints/flights_windowed"
+WINDOW_DURATION = "1 minute"
+WATERMARK_DELAY = "1 minute"
 
 
 def fetch_latest_schema(subject):
@@ -65,9 +76,34 @@ def main():
         "flight.*"
     )
 
+    # time_position can be null (rare, but the schema allows it) - fall
+    # back to last_contact rather than dropping the row from windowing.
+    events = parsed.withColumn(
+        "event_time",
+        coalesce(col("time_position"), col("last_contact")).cast("timestamp"),
+    ).withWatermark("event_time", WATERMARK_DELAY)
+
+    windowed = (
+        events.groupBy(window(col("event_time"), WINDOW_DURATION), col("region"))
+        .agg(
+            count("*").alias("flight_count"),
+            avg("baro_altitude").alias("avg_altitude_m"),
+        )
+        .select(
+            col("window.start").alias("window_start"),
+            col("window.end").alias("window_end"),
+            col("region"),
+            col("flight_count"),
+            col("avg_altitude_m"),
+        )
+    )
+
+    # "update" instead of "append": prints a window's aggregate as it
+    # changes with each new batch, rather than waiting for the watermark
+    # to close the window before showing anything.
     query = (
-        parsed.writeStream.format("console")
-        .outputMode("append")
+        windowed.writeStream.format("console")
+        .outputMode("update")
         .option("truncate", "false")
         .option("checkpointLocation", CHECKPOINT_LOCATION)
         .start()

@@ -102,7 +102,7 @@ incurring permanent infrastructure cost for a demo.
 - [x] Phase 3 – Error handling: dead-letter topic
 - [x] Phase 4 – Spark Structured Streaming: Kafka source, Avro
       deserialization, checkpointing
-- [ ] Phase 5 – Windowing/watermarking: tumbling window aggregation,
+- [x] Phase 5 – Windowing/watermarking: tumbling window aggregation,
       handling late events
 - [ ] Phase 6 – Enrichment + sink (ClickHouse), idempotent writes
 - [ ] Phase 7 – Monitoring: making consumer lag visible
@@ -135,6 +135,16 @@ PySpark needs a JVM - not installed by `pip`:
   `hadoop.dll` for a Hadoop 3.3.x build (e.g. from
   [cdarlint/winutils](https://github.com/cdarlint/winutils)) into a
   `bin/` folder, and set `HADOOP_HOME` to its parent directory.
+- **Windows only:** `spark-submit.cmd` resolves its own install location
+  (`SPARK_HOME`) via an internal `python` call before it does anything
+  else - and that call ignores the active venv, hitting Windows' "Python
+  was not found" App Execution Alias stub instead, which then surfaces as
+  `Failed to find Spark jars directory`. Set `SPARK_HOME` to the
+  `pyspark` package's install directory (e.g.
+  `<venv>\Lib\site-packages\pyspark`) to skip that lookup entirely. For
+  the same underlying reason, also set `PYSPARK_PYTHON` and
+  `PYSPARK_DRIVER_PYTHON` to the venv's `python.exe` so the job itself
+  doesn't hit the same stub once it's actually running.
 
 ### Kafka Fundamentals Demo
 
@@ -187,17 +197,17 @@ run, not for continuous operation (see comments in the script).
 ### Spark Structured Streaming
 
 `spark/flights_stream.py` reads `flights.raw`, deserializes the Avro
-payload, and prints the parsed rows to the console - scope is deliberately
-limited to Kafka source + Avro deserialization + checkpointing; windowed
-aggregations and a real sink come in later phases. Must run via
-`spark-submit` (not plain `python`) so the Kafka/Avro connector packages
-resolve onto the classpath:
+payload, and aggregates flight count and average altitude per region in
+1-minute tumbling windows, printed to the console. A real sink
+(ClickHouse) comes in a later phase. Must run via `spark-submit` (not
+plain `python`) so the Kafka/Avro connector packages resolve onto the
+classpath:
 
 ```bash
 spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0,org.apache.spark:spark-avro_2.13:4.2.0 spark/flights_stream.py
 ```
 
-Two things worth calling out:
+Things worth calling out:
 
 - **No Schema Registry integration in open-source Spark.** Unlike
   Databricks Runtime, plain Spark's `from_avro()` doesn't know how to talk
@@ -208,9 +218,17 @@ Two things worth calling out:
   `earliest`, since `from_avro()`'s single fixed schema can't decode
   `flights.raw`'s older schema v1 records (see Schema Evolution below).
 - **Checkpointing verified across restarts.** Stopped the job mid-stream
-  and restarted it against the same `checkpoints/flights_stream`
-  directory - it resumed exactly where it left off, with no gap and no
-  reprocessing of already-seen messages.
+  and restarted it - it resumed exactly where it left off, with no gap and
+  no reprocessing of already-seen messages.
+- **Event time, not processing time.** Windows are keyed on
+  `time_position` (when OpenSky recorded the position), not `ingested_at`
+  (when our producer wrote the record) - the two diverge under load or a
+  slow producer, which is exactly what watermarking needs to reason about.
+- **Late data verified as dropped.** Injected a message with a
+  `time_position` 10 minutes in the past while the job was running - it
+  never appeared in any window's aggregate, confirming the 1-minute
+  watermark correctly excludes data that arrives too late rather than
+  silently corrupting an already-emitted window.
 
 ### Schema Evolution
 
