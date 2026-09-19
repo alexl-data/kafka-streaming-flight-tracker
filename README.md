@@ -44,13 +44,13 @@ OpenSky REST API (polling, 5-10s)
                                              └──▶ DLQ topic (schema/parsing errors)
 Spark Structured Streaming
   ├─ Avro deserialization (schema fetched from the registry via REST)
-  ├─ Enrichment (region assignment, on-ground flag, etc.)
-  ├─ Tumbling window aggregation + watermark (flight density/altitude
-  │  distribution per region and time window, handling late events)
+  ├─ Enrichment (region assignment, unit conversions, etc.)
+  ├─ Tumbling window aggregation + watermark (flight count/altitude/speed
+  │  per region and time window, handling late events)
   └─ Checkpointing (exactly-once on the read side)
         │
         ▼
-   Sink: ClickHouse (Gold: aggregations)  +  Parquet/Delta (Silver: enriched raw)
+   Sink: ClickHouse (Gold: region_traffic, idempotent via ReplacingMergeTree)
         │
         ▼
    Live map (small web app, consumes flights.latest / Gold aggregates)
@@ -62,8 +62,9 @@ Monitoring: Kafka UI (topics, schemas, consumer lag)
 
 - **Bronze = the Kafka topic log.** Instead of a separate raw-data copy,
   the log itself (with sufficient retention) serves as the recovery point.
-  Silver (parsed/enriched) and Gold (aggregations) are produced as Spark
-  streaming outputs.
+  Silver (parsed/enriched) exists only as an in-flight Spark
+  transformation, not a separately persisted layer; Gold (aggregations)
+  is what actually gets persisted, to ClickHouse.
 - **Two topics, two purposes.** `flights.raw` is a classic event log,
   partitioned by region, for parallel windowed aggregations.
   `flights.latest` is a **compacted topic** (key = `icao24`) that holds
@@ -104,24 +105,26 @@ incurring permanent infrastructure cost for a demo.
       deserialization, checkpointing
 - [x] Phase 5 – Windowing/watermarking: tumbling window aggregation,
       handling late events
-- [ ] Phase 6 – Enrichment + sink (ClickHouse), idempotent writes
+- [x] Phase 6 – Enrichment + sink (ClickHouse), idempotent writes
 - [ ] Phase 7 – Monitoring: making consumer lag visible
 - [ ] Phase 8 – CI: lint/tests, schema compatibility check, Docker Compose validation
 - [ ] Phase 9 – CD: image build & push to GHCR
 - [ ] Phase 10 – Live map, README/architecture docs, polish
 
-## Setup (as of Phase 4)
+## Setup (as of Phase 6)
 
 ```bash
 docker compose up -d
 python -m venv .venv
 .venv\Scripts\activate       # Windows
 pip install -r requirements.txt
+docker exec -i clickhouse clickhouse-client --multiquery < clickhouse/init.sql
 ```
 
 - Kafka broker: `localhost:9092`
 - Kafka UI: [http://localhost:8081](http://localhost:8081)
 - Schema Registry: [http://localhost:8082](http://localhost:8082)
+- ClickHouse: `localhost:8123` (HTTP), `localhost:9000` (native)
 
 ### Additional Prerequisites for Spark (Phase 4+)
 
@@ -197,11 +200,10 @@ run, not for continuous operation (see comments in the script).
 ### Spark Structured Streaming
 
 `spark/flights_stream.py` reads `flights.raw`, deserializes the Avro
-payload, and aggregates flight count and average altitude per region in
-1-minute tumbling windows, printed to the console. A real sink
-(ClickHouse) comes in a later phase. Must run via `spark-submit` (not
-plain `python`) so the Kafka/Avro connector packages resolve onto the
-classpath:
+payload, and aggregates flight count, average altitude, and average speed
+per region in 1-minute tumbling windows, written to ClickHouse (see
+ClickHouse Sink below). Must run via `spark-submit` (not plain `python`)
+so the Kafka/Avro connector packages resolve onto the classpath:
 
 ```bash
 spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0,org.apache.spark:spark-avro_2.13:4.2.0 spark/flights_stream.py
@@ -229,6 +231,23 @@ Things worth calling out:
   never appeared in any window's aggregate, confirming the 1-minute
   watermark correctly excludes data that arrives too late rather than
   silently corrupting an already-emitted window.
+
+### ClickHouse Sink
+
+No Spark Structured Streaming connector exists for ClickHouse, so writes
+go through `foreachBatch` - Spark hands each micro-batch to a plain Python
+function, which inserts it via the `clickhouse-connect` client. Target
+table `region_traffic` (`clickhouse/init.sql`) uses the `ReplacingMergeTree`
+engine, ordered by `(window_start, region)`, versioned by an `updated_at`
+column - the mechanism that makes writing the same window idempotent.
+
+`outputMode("update")` means a still-open window gets re-inserted on every
+batch as its count grows, so the raw table temporarily holds multiple
+versions of the same `(window_start, region)` - visible directly with a
+plain `SELECT`. Querying with `SELECT ... FROM region_traffic FINAL`
+collapses that down to one row per key, keeping only the highest
+`updated_at` - verified by comparing both queries against the same window
+and confirming `FINAL` returns the latest values, not duplicates.
 
 ### Schema Evolution
 

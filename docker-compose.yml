@@ -82,5 +82,45 @@ services:
       schema-registry:
         condition: service_started
 
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8.8
+    container_name: clickhouse
+    # Without a limit, ClickHouse sizes its internal memory budget off the
+    # full host memory (no cgroup constraint to detect otherwise) - fine
+    # for our tiny data volume in practice, but an explicit bound is cheap
+    # and avoids it ever competing unbounded with Kafka/Spark for host RAM.
+    mem_limit: 2g
+    ports:
+      # 8123 = HTTP interface (used by the clickhouse-connect Python client),
+      # 9000 = native TCP protocol (used by the clickhouse-client CLI below).
+      - "8123:8123"
+      - "9000:9000"
+    environment:
+      # Single-user local dev setup - no auth needed to keep this in line
+      # with the rest of the stack (Kafka/Schema Registry are also
+      # unauthenticated PLAINTEXT locally).
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      # ClickHouse's own recommended minimum for the nofile limit - without
+      # this it can fail under load with "too many open files".
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+      # Failures during this window don't count against retries - without
+      # it, a slower first-time startup (e.g. fresh data directory) could
+      # get marked unhealthy before ClickHouse has actually finished
+      # starting.
+      start_period: 30s
+
 volumes:
   kafka-data:
+  clickhouse-data:
