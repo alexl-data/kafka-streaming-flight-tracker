@@ -19,9 +19,9 @@ stand-in for the random `region` key used in produce_demo.py.
 A record that fails Avro serialization (e.g. a required field missing
 because OpenSky's response was incomplete) is routed to the
 `flights.raw.dlq` topic instead of crashing the producer, wrapped in the
-same DlqEnvelope schema (schemas/dlq_envelope.avsc) that consume_flights.py
-uses for its own failures - one consistent shape for the DLQ topic,
-regardless of which side caught the problem.
+same DlqEnvelope schema (schemas/dlq_envelope.avsc) that
+spark/flights_stream.py uses for its own failures - one consistent shape
+for the DLQ topic, regardless of which stage caught the problem.
 """
 
 import json
@@ -85,9 +85,11 @@ def fetch_states():
 
 
 def build_producer(schema_registry_client):
-    # AvroSerializer needs the writer schema up front (unlike the consumer
-    # side - see consume_flights.py) and registers it with Schema Registry
-    # on first use if it isn't already registered there.
+    # AvroSerializer needs the writer schema up front (unlike the read
+    # side, where AvroDeserializer resolves the schema dynamically by ID -
+    # see spark/flights_stream.py's docstring for why Spark can't do that
+    # automatically) and registers it with Schema Registry on first use if
+    # it isn't already registered there.
     avro_serializer = AvroSerializer(
         schema_registry_client,
         SCHEMA_PATH.read_text(),
@@ -102,7 +104,7 @@ def build_producer(schema_registry_client):
 
 
 def build_dlq_producer(schema_registry_client):
-    # Same envelope schema consume_flights.py's DLQ path uses - see
+    # Same envelope schema spark/flights_stream.py's DLQ path uses - see
     # schemas/dlq_envelope.avsc. One shared SchemaRegistryClient instance
     # is fine to reuse across serializers for different schemas/subjects.
     avro_serializer = AvroSerializer(schema_registry_client, DLQ_SCHEMA_PATH.read_text())

@@ -191,8 +191,12 @@ schema registered in Schema Registry under the subject `flights.raw-value`:
 
 ```bash
 python producer/flights_producer.py
-python consumer/consume_flights.py   # Avro-aware consumer for flights.raw
 ```
+
+`spark/flights_stream.py` (see Spark Structured Streaming below) is the
+real consumer for this topic - there's no separate lightweight Python
+consumer for it; the fundamentals demo above already covers plain
+Kafka consumer mechanics against `demo.events`.
 
 Anonymous API access is capped at 400 requests/day - fine for a short demo
 run, not for continuous operation (see comments in the script).
@@ -300,15 +304,22 @@ and standardizes only the metadata around it (`stage`, `error`,
   wrapped in the envelope with `stage: "producer"` and no
   partition/offset (it never reached one). Verified by injecting a record
   missing `icao24`.
-- **Consumer:** switched from `DeserializingConsumer` to a plain
-  `Consumer` with a manually invoked `AvroDeserializer`, specifically to
-  keep access to the raw undecoded bytes on failure (the deserializing
-  variant raises out of `poll()` without exposing them). A message that
-  fails to decode is wrapped in the same envelope with `stage: "consumer"`
-  and its source partition/offset, original bytes untouched. Verified by
-  producing deliberately invalid bytes to `flights.raw` and confirming the
-  consumer caught `Invalid magic byte` and forwarded it correctly.
+- **Spark:** `from_avro()` has no error handling for malformed input at
+  all - tested its `mode: "PERMISSIVE"` option against deliberately
+  invalid bytes and it silently decoded them into a plausible-looking
+  wrong value instead of failing (Avro's binary format has no checksum to
+  validate against). `spark/flights_stream.py` instead checks the
+  Confluent wire-format magic byte itself before `from_avro()` runs,
+  splitting each micro-batch into a valid stream (parsed and windowed as
+  normal) and an invalid one (wrapped in the same envelope with
+  `stage: "spark"`, written to the DLQ via a second concurrent
+  `foreachBatch` query). This mirrors a check confluent-kafka's Python
+  `AvroDeserializer` library does internally on the read side (confirmed
+  earlier by feeding it deliberately invalid bytes with a plain Kafka
+  consumer, which raised `Invalid magic byte`) - Spark's `from_avro()` has
+  no equivalent built in, so the check has to be made explicit here.
+  Verified with the same kind of injected invalid message.
 
 A single DLQ-reading consumer can therefore deserialize every entry the
-same way regardless of which side produced it - confirmed by reading both
-test entries above back with one shared `AvroDeserializer`.
+same way regardless of which stage produced it - confirmed by reading
+entries from both stages back with one shared `AvroDeserializer`.

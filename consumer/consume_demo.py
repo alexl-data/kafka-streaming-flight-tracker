@@ -1,7 +1,10 @@
 """
 Minimal Kafka consumer used to learn the basics: reading messages, consumer
 groups, and offset management. Separate from the real pipeline
-(`consume_flights.py`, topic `flights.raw`) - see produce_demo.py for why.
+(`spark/flights_stream.py`, topic `flights.raw`) - see produce_demo.py for
+why. Spark's Kafka source doesn't use Kafka's consumer-group rebalancing
+protocol at all (it assigns partitions to its own tasks internally), so
+this script is the only place in the project that demonstrates it.
 
 Run two instances of this script at once (same GROUP_ID) to see Kafka split
 the topic's partitions between them, and reassign them when one instance

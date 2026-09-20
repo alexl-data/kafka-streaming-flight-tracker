@@ -26,12 +26,6 @@ event time, not `ingested_at` (when our producer processed the record) -
 the two diverge whenever a batch arrives late or out of order, which is
 exactly what the watermark below needs to reason about.
 
-The checkpoint directory is named after this job's sink/aggregation shape,
-not just the source topic: a checkpoint is tied to the exact streaming
-query that created it, and both the query (new avg_velocity_kmh column)
-and the sink (ClickHouse instead of console) changed again in this phase -
-reusing an older checkpoint here would fail to resume correctly.
-
 ClickHouse has no native Spark Structured Streaming connector, so writes
 go through `foreachBatch`, Spark's escape hatch for sinks without one:
 Spark hands each micro-batch to a plain Python function instead of a
@@ -41,21 +35,58 @@ retry idempotent - ClickHouse collapses rows with the same
 (window_start, region) down to the most recent one, so a replayed batch
 doesn't duplicate data even though `foreachBatch` itself gives no
 exactly-once guarantee on its own.
+
+Every message is also checked for a valid Confluent wire-format header
+(1 magic byte, must be 0x00, + 4-byte schema ID) before from_avro() ever
+sees it. This mirrors a check confluent-kafka's Python AvroDeserializer
+already does internally for us (confirmed earlier by testing it against
+deliberately invalid bytes with a plain Kafka consumer, which raised
+"Invalid magic byte") - Spark's from_avro() has no equivalent built in.
+Verified empirically before relying on it: from_avro() with option
+"mode": "PERMISSIVE" does NOT reliably flag malformed input as null/error
+- fed deliberately garbage bytes, it silently decoded them into a
+plausible-looking-but-wrong value instead of failing, because Avro's
+binary format has no checksum to validate against and a simple schema can
+make almost any bytes "decode" into something. Messages failing the
+header check are routed to `flights.raw.dlq` directly (skipping
+from_avro entirely) using the same DlqEnvelope schema flights_producer.py
+uses for its own failures - deliberately scoped to only this one failure
+class (no Confluent header at all); a valid header with corrupted payload
+bytes after it would not be caught by this check.
 """
+
+import time
+from pathlib import Path
 
 import clickhouse_connect
 import requests
+from confluent_kafka import SerializingProducer
+from confluent_kafka.schema_registry import SchemaRegistryClient
+from confluent_kafka.schema_registry.avro import AvroSerializer
 from pyspark.sql import SparkSession
 from pyspark.sql.avro.functions import from_avro
-from pyspark.sql.functions import avg, coalesce, col, count, current_timestamp, expr, window
+from pyspark.sql.functions import (
+    avg,
+    coalesce,
+    col,
+    count,
+    current_timestamp,
+    expr,
+    length,
+    lit,
+    window,
+)
 
 BOOTSTRAP_SERVERS = "localhost:9092"
 SCHEMA_REGISTRY_URL = "http://localhost:8082"
 TOPIC = "flights.raw"
+DLQ_TOPIC = "flights.raw.dlq"
+DLQ_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "dlq_envelope.avsc"
 CLICKHOUSE_HOST = "localhost"
 CLICKHOUSE_PORT = 8123
 CLICKHOUSE_TABLE = "region_traffic"
 CHECKPOINT_LOCATION = "checkpoints/flights_clickhouse"
+DLQ_CHECKPOINT_LOCATION = "checkpoints/flights_dlq"
 WINDOW_DURATION = "1 minute"
 WATERMARK_DELAY = "1 minute"
 
@@ -102,6 +133,35 @@ def write_to_clickhouse(batch_df, batch_id):
     print(f"Batch {batch_id}: wrote {len(data)} rows to ClickHouse")
 
 
+def write_bad_to_dlq(batch_df, batch_id):
+    rows = batch_df.collect()
+    if not rows:
+        return
+
+    schema_registry_client = SchemaRegistryClient({"url": SCHEMA_REGISTRY_URL})
+    dlq_producer = SerializingProducer(
+        {
+            "bootstrap.servers": BOOTSTRAP_SERVERS,
+            "value.serializer": AvroSerializer(schema_registry_client, DLQ_SCHEMA_PATH.read_text()),
+        }
+    )
+    for r in rows:
+        envelope = {
+            "stage": "spark",
+            "error": "Missing or invalid Confluent wire-format header (magic byte != 0x00)",
+            "error_type": "InvalidMagicByte",
+            "source_topic": r.topic,
+            "source_partition": r.partition,
+            "source_offset": r.offset,
+            "failed_at": int(time.time() * 1000),
+            "original_key": r.key.decode("utf-8", errors="replace") if r.key is not None else None,
+            "original_value": r.value,
+        }
+        dlq_producer.produce(topic=DLQ_TOPIC, value=envelope)
+    dlq_producer.flush()
+    print(f"Batch {batch_id}: routed {len(rows)} invalid messages to DLQ")
+
+
 def main():
     schema_str = fetch_latest_schema(f"{TOPIC}-value")
 
@@ -116,11 +176,22 @@ def main():
         .load()
     )
 
+    # See module docstring: from_avro() has no way to detect malformed
+    # input on its own, so messages without a valid Confluent header are
+    # filtered out and routed to the DLQ before from_avro() ever sees them.
+    has_valid_header = (length(col("value")) >= 5) & (
+        col("value").substr(1, 1) == lit(bytes([0]))
+    )
+    good = raw.filter(has_valid_header)
+    bad = raw.select("key", "value", "topic", "partition", "offset").filter(
+        ~has_valid_header
+    )
+
     # substring() is 1-indexed in Spark SQL: byte 6 onward skips the 5-byte
     # Confluent header (1 magic byte + 4-byte schema ID).
     avro_payload = expr("substring(value, 6, length(value) - 5)")
 
-    parsed = raw.select(from_avro(avro_payload, schema_str).alias("flight")).select(
+    parsed = good.select(from_avro(avro_payload, schema_str).alias("flight")).select(
         "flight.*"
     )
 
@@ -156,14 +227,24 @@ def main():
     # "update" instead of "append": writes a window's aggregate to
     # ClickHouse as it changes with each new batch, rather than waiting
     # for the watermark to close the window before writing anything.
-    query = (
-        windowed.writeStream.foreachBatch(write_to_clickhouse)
-        .outputMode("update")
-        .option("checkpointLocation", CHECKPOINT_LOCATION)
-        .start()
-    )
+    windowed.writeStream.foreachBatch(write_to_clickhouse).outputMode(
+        "update"
+    ).option("checkpointLocation", CHECKPOINT_LOCATION).start()
 
-    query.awaitTermination()
+    # Separate streaming query with its own checkpoint - a different query
+    # shape (no aggregation) than the windowed one above, so it can't share
+    # a checkpoint with it. Runs concurrently with the query above; both
+    # were already started (non-blocking) by the time either await below
+    # runs.
+    bad.writeStream.foreachBatch(write_bad_to_dlq).outputMode("append").option(
+        "checkpointLocation", DLQ_CHECKPOINT_LOCATION
+    ).start()
+
+    # Waits for either query to stop (including a crash) rather than only
+    # the first one started - awaiting a single query's awaitTermination()
+    # would block forever on that one query alone and never notice if the
+    # other one failed.
+    spark.streams.awaitAnyTermination()
 
 
 if __name__ == "__main__":
