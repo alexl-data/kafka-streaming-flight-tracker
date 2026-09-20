@@ -96,6 +96,7 @@ from pyspark.sql.functions import (
     when,
     window,
 )
+from pyspark.sql.streaming import StreamingQueryListener
 
 # Static reference data for the stream-static join below - standardized
 # ICAO emergency transponder (squawk) codes, not derived from any stream.
@@ -117,6 +118,10 @@ CHECKPOINT_LOCATION = "checkpoints/region_traffic"
 DLQ_CHECKPOINT_LOCATION = "checkpoints/flights_dlq"
 WINDOW_DURATION = "1 minute"
 WATERMARK_DELAY = "1 minute"
+# Matches flights_producer.py's own poll interval (POLL_INTERVAL_SECONDS) -
+# checking for new data more often than the producer can possibly supply
+# it just adds empty micro-batch overhead without reducing latency.
+TRIGGER_INTERVAL = "15 seconds"
 
 
 def fetch_latest_schema(subject):
@@ -192,11 +197,35 @@ def write_bad_to_dlq(batch_df, batch_id):
     print(f"Batch {batch_id}: routed {len(rows)} invalid messages to DLQ")
 
 
+class ProgressLogger(StreamingQueryListener):
+    """
+    Spark's own operational metrics for both queries (throughput, batch
+    duration) - the counterpart to Monitoring's finding that this job is
+    invisible to classic Kafka consumer-lag tooling. Registered once via
+    spark.streams.addListener(); onQueryProgress fires after every
+    completed micro-batch for every active query in this session.
+    """
+
+    def onQueryStarted(self, event):
+        print(f"[{event.name}] started")
+
+    def onQueryProgress(self, event):
+        p = event.progress
+        print(
+            f"[{p.name}] batch={p.batchId} rows={p.numInputRows} "
+            f"rows/sec={p.inputRowsPerSecond:.2f} batch_duration_ms={p.batchDuration}"
+        )
+
+    def onQueryTerminated(self, event):
+        print(f"[query {event.id}] terminated" + (f": {event.exception}" if event.exception else ""))
+
+
 def main():
     schema_str = fetch_latest_schema(f"{TOPIC}-value")
 
     spark = SparkSession.builder.appName("flights-stream").getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
+    spark.streams.addListener(ProgressLogger())
 
     raw = (
         spark.readStream.format("kafka")
@@ -271,16 +300,23 @@ def main():
     # "update" instead of "append": writes a window's aggregate to
     # ClickHouse as it changes with each new batch, rather than waiting
     # for the watermark to close the window before writing anything.
+    # queryName() gives ProgressLogger something readable to print instead
+    # of a raw UUID; trigger() caps how often Spark even checks for new
+    # data - see TRIGGER_INTERVAL above.
     windowed.writeStream.foreachBatch(write_to_clickhouse).outputMode(
         "update"
-    ).option("checkpointLocation", CHECKPOINT_LOCATION).start()
+    ).queryName("region_traffic").trigger(processingTime=TRIGGER_INTERVAL).option(
+        "checkpointLocation", CHECKPOINT_LOCATION
+    ).start()
 
     # Separate streaming query with its own checkpoint - a different query
     # shape (no aggregation) than the windowed one above, so it can't share
     # a checkpoint with it. Runs concurrently with the query above; both
     # were already started (non-blocking) by the time either await below
     # runs.
-    bad.writeStream.foreachBatch(write_bad_to_dlq).outputMode("append").option(
+    bad.writeStream.foreachBatch(write_bad_to_dlq).outputMode("append").queryName(
+        "flights_dlq"
+    ).trigger(processingTime=TRIGGER_INTERVAL).option(
         "checkpointLocation", DLQ_CHECKPOINT_LOCATION
     ).start()
 

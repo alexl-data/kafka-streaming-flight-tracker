@@ -109,7 +109,8 @@ incurring permanent infrastructure cost for a demo.
 - [x] Phase 5 – Windowing/watermarking: tumbling window aggregation,
       handling late events
 - [x] Phase 6 – Enrichment + sink (ClickHouse), idempotent writes
-- [x] Phase 7 – Monitoring: making consumer lag visible
+- [x] Phase 7 – Monitoring: pipeline progress visible via Kafka consumer
+      lag (classic consumers) and Spark's own streaming query metrics
 - [ ] Phase 8 – CI: lint/tests, schema compatibility check, Docker Compose validation
 - [ ] Phase 9 – CD: image build & push to GHCR
 - [ ] Phase 10 – Live map, README/architecture docs, polish
@@ -347,5 +348,11 @@ like it should fix this, but the same docs explicitly scope it to
 authorization scenarios (e.g. Kafka ACLs) and warn against setting it
 otherwise; tried it anyway and the job still didn't appear in the list.
 There's no supported way to make a Structured Streaming Kafka source
-visible to classic consumer-lag tooling - its progress has to be read a
-different way (see below).
+visible to classic consumer-lag tooling - its progress is tracked instead
+through Spark's own `StreamingQueryListener` API
+(`ProgressLogger` in `flights_stream.py`), which reports per-batch
+throughput and duration for both queries directly from Spark. Both
+queries also run on a `Trigger.ProcessingTime` matched to the producer's
+15-second poll interval, rather than Spark's default of checking for new
+data continuously - polling faster than the producer can supply it only
+adds empty-microbatch overhead.
