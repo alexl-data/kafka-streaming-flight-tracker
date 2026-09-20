@@ -13,7 +13,20 @@ OpenSky account (OAuth2) raises that quota, but isn't needed to see this
 work.
 
 Each aircraft's position is bucketed into one of four coarse quadrants of
-the bounding box (nw/ne/sw/se) and used as the Kafka partition key.
+the bounding box (nw/ne/sw/se) and used as the Kafka partition key for
+`flights.raw`.
+
+Every record is also published to `flights.latest`, a compacted topic
+keyed by `icao24` (the aircraft's own transponder ID) - Kafka keeps only
+the most recent message per key there once compaction runs, so it holds
+"the current position of every aircraft" without ever growing unbounded,
+unlike `flights.raw`'s append-only event log. Both topics get the exact
+same record/schema; only the topic and key differ. Reuses the same
+AvroSerializer for both: confluent-kafka derives the Schema Registry
+subject from the topic given to each individual produce() call (the
+default TopicNameStrategy), so writing to a second topic with the same
+value schema just registers a second, independent subject
+(`flights.latest-value`) automatically - no separate serializer needed.
 
 A record that fails Avro serialization (e.g. a required field missing
 because OpenSky's response was incomplete) is routed to the
@@ -39,6 +52,7 @@ BOOTSTRAP_SERVERS = "localhost:9092"
 # docker-compose.yml for why it's 8082 instead of the 8081 default.
 SCHEMA_REGISTRY_URL = "http://localhost:8082"
 TOPIC = "flights.raw"
+LATEST_TOPIC = "flights.latest"
 DLQ_TOPIC = "flights.raw.dlq"
 OPENSKY_URL = "https://opensky-network.org/api/states/all"
 SCHEMAS_DIR = Path(__file__).resolve().parent.parent / "schemas"
@@ -172,6 +186,17 @@ def main():
                         key=record["region"],
                         value=record,
                         on_delivery=delivery_report,
+                    )
+                    # Same record, same schema, just a different topic and
+                    # key - if serialization were going to fail on this
+                    # record it already would have above, so this call
+                    # never actually throws in practice; the shared except
+                    # below exists for symmetry, not because this line
+                    # realistically fails independently.
+                    producer.produce(
+                        topic=LATEST_TOPIC,
+                        key=record["icao24"],
+                        value=record,
                     )
                     sent += 1
                 except (ValueSerializationError, KeySerializationError) as exc:

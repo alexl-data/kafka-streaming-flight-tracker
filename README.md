@@ -170,6 +170,37 @@ for it; this repo stays scoped to the real pipeline rather than including
 standalone Kafka-fundamentals demos alongside it (see git history for an
 earlier version that did).
 
+### Log Compaction (`flights.latest`)
+
+Every record the producer sends to `flights.raw` is also sent to
+`flights.latest`, same schema, keyed by `icao24` instead of `region`.
+Created with `cleanup.policy=compact`: Kafka retains only the most recent
+message per key there, so the topic holds "current position of every
+aircraft" without growing unbounded - unlike `flights.raw`'s append-only
+log, which keeps every event. One `AvroSerializer` instance handles both
+topics; confluent-kafka derives the Schema Registry subject from the topic
+given to each individual `produce()` call, so this needed no second
+serializer, just a second `produce()` call with the same record.
+
+For local development the topic also sets aggressive compaction settings
+(`segment.ms=60000`, `min.cleanable.dirty.ratio=0.01`,
+`delete.retention.ms=100`) - production defaults compact far less
+eagerly, which would make this untestable within a normal working
+session.
+
+Verified directly, not just configured: sent 8 updates for one synthetic
+aircraft key, confirmed all 8 were initially present, then triggered a
+segment roll (compaction only ever touches *closed* segments, never the
+currently active one - a 9th write forced the roll) and waited for the
+background log cleaner. Result: 2 messages remained, not 1 - the closed
+segment correctly compacted its 8 records down to the single latest one,
+while the 9th record survived untouched because it landed in the new,
+still-active segment that compaction can't touch yet. Both records
+converge to one on the next compaction cycle once that segment closes too
+- eventual, not immediate, consistency, the same category of behavior as
+ClickHouse's `ReplacingMergeTree` (see ClickHouse Sink) but through a
+different mechanism.
+
 Anonymous API access is capped at 400 requests/day - fine for a short demo
 run, not for continuous operation (see comments in the script).
 
