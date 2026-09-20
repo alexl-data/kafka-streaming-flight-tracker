@@ -21,6 +21,16 @@ and v2 messages (see README, Schema Evolution) that a single schema can't
 both decode. Starting from "latest" reads only messages produced under the
 current schema.
 
+This job is invisible to standard consumer-lag tooling (Kafka UI,
+kafka-consumer-groups.sh) - verified against Spark's own docs and by
+testing: Spark's Kafka source never commits offsets to Kafka's consumer
+group coordinator, regardless of whether `kafka.group.id` is set (that
+option exists only for authorization/ACL scenarios, and Spark's docs warn
+against setting it otherwise - a query started with it wasn't visible to
+`kafka-consumer-groups --list` either). There's no supported way to make
+this job's progress visible through classic consumer-group lag tools; see
+README, Monitoring for how progress is tracked instead.
+
 Windowing uses `time_position` (when OpenSky recorded the position) as
 event time, not `ingested_at` (when our producer processed the record) -
 the two diverge whenever a batch arrives late or out of order, which is

@@ -94,9 +94,12 @@ incurring permanent infrastructure cost for a demo.
 ## Roadmap / Commit Phases
 
 - [x] Phase 0 – Repo scaffold, Kafka (KRaft) + Kafka UI via Docker Compose
-- [x] Phase 1 – Kafka fundamentals: simple JSON producer/consumer,
-      consumer group demo (2 instances), explicit topic creation with
-      partitioning
+- [x] Phase 1 – Kafka fundamentals: explicit topic creation with
+      partitioning against the real `flights.raw` topic (an earlier
+      version of this phase used standalone demo scripts and a separate
+      `demo.events` topic to also show consumer-group rebalancing - later
+      removed to keep the repo scoped to the real pipeline only; see git
+      history)
 - [x] Phase 2a – Live data source: OpenSky Network producer (DACH bounding box)
 - [x] Phase 2b – Schema Registry + Avro serialization for the real pipeline
 - [x] Phase 2c – First schema evolution
@@ -106,7 +109,7 @@ incurring permanent infrastructure cost for a demo.
 - [x] Phase 5 – Windowing/watermarking: tumbling window aggregation,
       handling late events
 - [x] Phase 6 – Enrichment + sink (ClickHouse), idempotent writes
-- [ ] Phase 7 – Monitoring: making consumer lag visible
+- [x] Phase 7 – Monitoring: making consumer lag visible
 - [ ] Phase 8 – CI: lint/tests, schema compatibility check, Docker Compose validation
 - [ ] Phase 9 – CD: image build & push to GHCR
 - [ ] Phase 10 – Live map, README/architecture docs, polish
@@ -149,38 +152,6 @@ PySpark needs a JVM - not installed by `pip`:
   `PYSPARK_DRIVER_PYTHON` to the venv's `python.exe` so the job itself
   doesn't hit the same stub once it's actually running.
 
-### Kafka Fundamentals Demo
-
-Kept as a standalone reference example, deliberately separate from the real
-pipeline: a minimal, JSON-only producer/consumer pair for learning Kafka's
-core mechanics (producing, partitioning, consumer groups, offsets) without
-the added complexity of Avro or an external API. It uses its own topic,
-`demo.events`, so it can never end up mixing synthetic test events with
-real flight data in the same topic.
-
-The topic is created explicitly (not auto-created) with 4 partitions -
-matching the number of distinct region keys the demo producer uses, so
-each partition maps to roughly one region instead of a handful of
-partitions sitting empty:
-
-```bash
-docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
-  --create --topic demo.events --partitions 4 --replication-factor 1
-```
-
-`producer/produce_demo.py` sends synthetic test events keyed by a `region`
-field, to make partitioning and key-based ordering observable without
-depending on the external API.
-
-`consumer/consume_demo.py` reads them back. Running two instances at once
-with the same consumer group ID (`demo-consumer-group`) demonstrates Kafka
-splitting the topic's 4 partitions between them:
-
-```bash
-python producer/produce_demo.py
-python consumer/consume_demo.py   # run in two terminals to see the group rebalance
-```
-
 ### Live Flight Data
 
 `producer/flights_producer.py` polls the real OpenSky Network API (DACH
@@ -194,9 +165,10 @@ python producer/flights_producer.py
 ```
 
 `spark/flights_stream.py` (see Spark Structured Streaming below) is the
-real consumer for this topic - there's no separate lightweight Python
-consumer for it; the fundamentals demo above already covers plain
-Kafka consumer mechanics against `demo.events`.
+consumer for this topic - no separate lightweight Python consumer exists
+for it; this repo stays scoped to the real pipeline rather than including
+standalone Kafka-fundamentals demos alongside it (see git history for an
+earlier version that did).
 
 Anonymous API access is capped at 400 requests/day - fine for a short demo
 run, not for continuous operation (see comments in the script).
@@ -323,3 +295,18 @@ and standardizes only the metadata around it (`stage`, `error`,
 A single DLQ-reading consumer can therefore deserialize every entry the
 same way regardless of which stage produced it - confirmed by reading
 entries from both stages back with one shared `AvroDeserializer`.
+
+### Monitoring
+
+`spark/flights_stream.py` is invisible to classic Kafka consumer-lag
+tooling (Kafka UI, `kafka-consumer-groups --describe`). Checked Spark's
+own Structured Streaming + Kafka documentation, which states plainly that
+the Kafka source never commits offsets to Kafka's consumer group
+coordinator - confirmed by starting the job and finding it absent from
+`kafka-consumer-groups --list` entirely. The `kafka.group.id` option looks
+like it should fix this, but the same docs explicitly scope it to
+authorization scenarios (e.g. Kafka ACLs) and warn against setting it
+otherwise; tried it anyway and the job still didn't appear in the list.
+There's no supported way to make a Structured Streaming Kafka source
+visible to classic consumer-lag tooling - its progress has to be read a
+different way (see below).

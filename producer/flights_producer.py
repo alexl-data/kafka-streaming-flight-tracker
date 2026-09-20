@@ -13,8 +13,7 @@ OpenSky account (OAuth2) raises that quota, but isn't needed to see this
 work.
 
 Each aircraft's position is bucketed into one of four coarse quadrants of
-the bounding box (nw/ne/sw/se) and used as the Kafka partition key - a real
-stand-in for the random `region` key used in produce_demo.py.
+the bounding box (nw/ne/sw/se) and used as the Kafka partition key.
 
 A record that fails Avro serialization (e.g. a required field missing
 because OpenSky's response was incomplete) is routed to the
@@ -162,12 +161,11 @@ def main():
 
                 # SerializingProducer runs `record` through the configured
                 # key/value serializers itself - no manual json.dumps() or
-                # Avro encoding here, unlike the plain Producer in
-                # produce_demo.py. That serialization happens synchronously,
-                # right here in produce() - so a malformed record (e.g. a
-                # required field missing because OpenSky's response was
-                # incomplete) raises immediately, not asynchronously via
-                # the delivery callback.
+                # Avro encoding here. That serialization happens
+                # synchronously, right here in produce() - so a malformed
+                # record (e.g. a required field missing because OpenSky's
+                # response was incomplete) raises immediately, not
+                # asynchronously via the delivery callback.
                 try:
                     producer.produce(
                         topic=TOPIC,
