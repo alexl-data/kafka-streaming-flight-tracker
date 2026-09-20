@@ -36,6 +36,15 @@ event time, not `ingested_at` (when our producer processed the record) -
 the two diverge whenever a batch arrives late or out of order, which is
 exactly what the watermark below needs to reason about.
 
+Each event is also left-joined against a small static lookup table of
+standardized ICAO emergency squawk codes (7500 hijacking, 7600 radio
+failure, 7700 general emergency) - a stream-static join, Spark's term for
+joining a streaming DataFrame against a small, in-memory, non-streaming
+one. Non-matching rows (nearly all of them - the vast majority of flights
+never squawk an emergency code) simply get a null `alert_type`, counted
+separately per window/region as `emergency_count` alongside the existing
+aggregates.
+
 ClickHouse has no native Spark Structured Streaming connector, so writes
 go through `foreachBatch`, Spark's escape hatch for sinks without one:
 Spark hands each micro-batch to a plain Python function instead of a
@@ -84,8 +93,17 @@ from pyspark.sql.functions import (
     expr,
     length,
     lit,
+    when,
     window,
 )
+
+# Static reference data for the stream-static join below - standardized
+# ICAO emergency transponder (squawk) codes, not derived from any stream.
+EMERGENCY_SQUAWK_CODES = [
+    ("7500", "hijacking"),
+    ("7600", "radio_failure"),
+    ("7700", "general_emergency"),
+]
 
 BOOTSTRAP_SERVERS = "localhost:9092"
 SCHEMA_REGISTRY_URL = "http://localhost:8082"
@@ -95,7 +113,7 @@ DLQ_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "dlq_enve
 CLICKHOUSE_HOST = "localhost"
 CLICKHOUSE_PORT = 8123
 CLICKHOUSE_TABLE = "region_traffic"
-CHECKPOINT_LOCATION = "checkpoints/flights_clickhouse"
+CHECKPOINT_LOCATION = "checkpoints/region_traffic"
 DLQ_CHECKPOINT_LOCATION = "checkpoints/flights_dlq"
 WINDOW_DURATION = "1 minute"
 WATERMARK_DELAY = "1 minute"
@@ -123,6 +141,7 @@ def write_to_clickhouse(batch_df, batch_id):
             r.flight_count,
             r.avg_altitude_m,
             r.avg_velocity_kmh,
+            r.emergency_count,
             r.updated_at,
         ]
         for r in rows
@@ -137,6 +156,7 @@ def write_to_clickhouse(batch_df, batch_id):
             "flight_count",
             "avg_altitude_m",
             "avg_velocity_kmh",
+            "emergency_count",
             "updated_at",
         ],
     )
@@ -205,9 +225,19 @@ def main():
         "flight.*"
     )
 
+    emergency_squawks = spark.createDataFrame(
+        EMERGENCY_SQUAWK_CODES, ["squawk", "alert_type"]
+    )
+    # Stream-static join: emergency_squawks never changes and isn't read
+    # from Kafka, so this is a plain DataFrame join, not a join between
+    # two streaming sources (Structured Streaming has extra restrictions
+    # for those). Left join so a normal (non-emergency) squawk - the vast
+    # majority - just gets a null alert_type instead of being dropped.
+    enriched = parsed.join(emergency_squawks, on="squawk", how="left")
+
     # time_position can be null (rare, but the schema allows it) - fall
     # back to last_contact rather than dropping the row from windowing.
-    events = parsed.withColumn(
+    events = enriched.withColumn(
         "event_time",
         coalesce(col("time_position"), col("last_contact")).cast("timestamp"),
     ).withWatermark("event_time", WATERMARK_DELAY)
@@ -220,6 +250,9 @@ def main():
             # Enrichment: OpenSky reports velocity in m/s: convert to
             # km/h, the more common unit for a "traffic" style view.
             avg(col("velocity") * 3.6).alias("avg_velocity_kmh"),
+            # From the stream-static join above - counts rows where the
+            # join actually matched an emergency code.
+            count(when(col("alert_type").isNotNull(), 1)).alias("emergency_count"),
         )
         .select(
             col("window.start").alias("window_start"),
@@ -228,6 +261,7 @@ def main():
             col("flight_count"),
             col("avg_altitude_m"),
             col("avg_velocity_kmh"),
+            col("emergency_count"),
             # Version column for ClickHouse's ReplacingMergeTree - see
             # clickhouse/init.sql and the module docstring.
             current_timestamp().alias("updated_at"),

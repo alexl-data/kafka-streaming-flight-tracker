@@ -18,6 +18,10 @@ CREATE TABLE IF NOT EXISTS region_traffic
     -- not missing/bad data.
     avg_altitude_m Nullable(Float64),
     avg_velocity_kmh Nullable(Float64),
+    -- From a stream-static join in Spark against a small table of
+    -- standardized ICAO emergency squawk codes (7500/7600/7700) - count
+    -- of records in this window/region whose squawk matched one of them.
+    emergency_count UInt32,
     -- Set from Spark's current_timestamp() (see flights_stream.py), which
     -- Spark fixes once per micro-batch at query analysis time - the same
     -- value for every row in a batch, but a fresh, later value on every

@@ -207,10 +207,12 @@ run, not for continuous operation (see comments in the script).
 ### Spark Structured Streaming
 
 `spark/flights_stream.py` reads `flights.raw`, deserializes the Avro
-payload, and aggregates flight count, average altitude, and average speed
-per region in 1-minute tumbling windows, written to ClickHouse (see
-ClickHouse Sink below). Must run via `spark-submit` (not plain `python`)
-so the Kafka/Avro connector packages resolve onto the classpath:
+payload, left-joins each event against a small static table of emergency
+squawk codes, and aggregates flight count, average altitude, average
+speed, and emergency-squawk count per region in 1-minute tumbling
+windows, written to ClickHouse (see ClickHouse Sink below). Must run via
+`spark-submit` (not plain `python`) so the Kafka/Avro connector packages
+resolve onto the classpath:
 
 ```bash
 spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0,org.apache.spark:spark-avro_2.13:4.2.0 spark/flights_stream.py
@@ -238,6 +240,12 @@ Things worth calling out:
   never appeared in any window's aggregate, confirming the 1-minute
   watermark correctly excludes data that arrives too late rather than
   silently corrupting an already-emitted window.
+- **Stream-static join, verified.** The emergency-squawk lookup is a
+  plain `spark.createDataFrame()`, not read from Kafka, so joining it
+  against the streaming DataFrame is an ordinary join rather than a
+  stream-stream join (which Structured Streaming restricts more heavily).
+  Sent 3 normal-squawk records and 1 with `squawk=7700` in the same
+  window - the resulting row showed `flight_count=4`, `emergency_count=1`.
 
 ### ClickHouse Sink
 
