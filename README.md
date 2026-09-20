@@ -91,6 +91,27 @@ Registry on every merge to `main`, plus a documented (not continuously
 operated) deploy step. This demonstrates CI/CD craftsmanship without
 incurring permanent infrastructure cost for a demo.
 
+### Cost / Latency Trade-offs
+
+Several settings already introduced above are, at their core, the same
+kind of decision - trading a bit of latency or completeness for lower
+cost or simpler infrastructure, or the reverse:
+
+- **OpenSky polling interval (15s):** bounded by the anonymous API's free
+  daily quota, not chosen as a latency target - data is inherently up to
+  15s stale before it's even fetched.
+- **Spark trigger interval (matched to the same 15s):** pure overhead
+  reduction, no latency trade-off - checking Kafka faster than the
+  producer can supply data would not make results arrive any sooner.
+- **1-minute windows + 1-minute watermark:** a direct completeness-vs-latency
+  trade-off - a longer watermark would catch more genuinely late events
+  but delays when a window counts as final.
+- **No 24/7 deployment target (see CI/CD Scope above):** full production
+  realism traded for zero ongoing infrastructure cost.
+- **ClickHouse capped at 2 GB:** a small, fixed ceiling appropriate for
+  the data volume this project actually produces, not provisioned for
+  scale it doesn't need.
+
 ## Roadmap / Commit Phases
 
 - [x] Phase 0 – Repo scaffold, Kafka (KRaft) + Kafka UI via Docker Compose
