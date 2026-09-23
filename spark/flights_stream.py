@@ -1,82 +1,21 @@
 """
 Spark Structured Streaming job: reads Avro-serialized events from
-`flights.raw`, aggregates flight count, average altitude, and average
-speed per region in 1-minute tumbling windows, and writes the running
-results to ClickHouse (table `region_traffic`, see clickhouse/init.sql).
+`flights.raw`, joins them against a static table of emergency squawk
+codes, and aggregates flight count, average altitude, average speed, and
+emergency-squawk count per region in 1-minute tumbling windows, written
+to ClickHouse (table `region_traffic`, see clickhouse/init.sql).
 
 Must be launched with spark-submit, not plain `python`, so the Kafka and
-Avro connector packages (and their transitive dependencies) get resolved
-onto the classpath - see README for the exact command.
+Avro connector packages resolve onto the classpath - see README for the
+exact command.
 
-Open-source Spark has no built-in Schema Registry integration (unlike
-Databricks Runtime's `from_avro` variant, which can talk to a registry
-directly). Here the schema is fetched once at startup via Schema
-Registry's REST API, and Confluent's 5-byte wire-format header (1 magic
-byte + 4-byte schema ID) is stripped from each message before Spark's own
-`from_avro()` - which knows nothing about that header - can parse it.
-
-Reads `startingOffsets: latest` rather than `earliest`: `from_avro()`
-decodes against one fixed schema, and `flights.raw` has a mix of schema v1
-and v2 messages (see README, Schema Evolution) that a single schema can't
-both decode. Starting from "latest" reads only messages produced under the
-current schema.
-
-This job is invisible to standard consumer-lag tooling (Kafka UI,
-kafka-consumer-groups.sh) - verified against Spark's own docs and by
-testing: Spark's Kafka source never commits offsets to Kafka's consumer
-group coordinator, regardless of whether `kafka.group.id` is set (that
-option exists only for authorization/ACL scenarios, and Spark's docs warn
-against setting it otherwise - a query started with it wasn't visible to
-`kafka-consumer-groups --list` either). There's no supported way to make
-this job's progress visible through classic consumer-group lag tools; see
-README, Monitoring for how progress is tracked instead.
-
-Windowing uses `time_position` (when OpenSky recorded the position) as
-event time, not `ingested_at` (when our producer processed the record) -
-the two diverge whenever a batch arrives late or out of order, which is
-exactly what the watermark below needs to reason about.
-
-Each event is also left-joined against a small static lookup table of
-standardized ICAO emergency squawk codes (7500 hijacking, 7600 radio
-failure, 7700 general emergency) - a stream-static join, Spark's term for
-joining a streaming DataFrame against a small, in-memory, non-streaming
-one. Non-matching rows (nearly all of them - the vast majority of flights
-never squawk an emergency code) simply get a null `alert_type`, counted
-separately per window/region as `emergency_count` alongside the existing
-aggregates.
-
-ClickHouse has no native Spark Structured Streaming connector, so writes
-go through `foreachBatch`, Spark's escape hatch for sinks without one:
-Spark hands each micro-batch to a plain Python function instead of a
-built-in writer. The table itself (ReplacingMergeTree, see
-clickhouse/init.sql) is what makes re-inserting the same batch after a
-retry idempotent - ClickHouse collapses rows with the same
-(window_start, region) down to the most recent one, so a replayed batch
-doesn't duplicate data even though `foreachBatch` itself gives no
-exactly-once guarantee on its own.
-
-Every message is also checked for a valid Confluent wire-format header
-(1 magic byte, must be 0x00, + 4-byte schema ID) before from_avro() ever
-sees it. This mirrors a check confluent-kafka's Python AvroDeserializer
-already does internally for us (confirmed earlier by testing it against
-deliberately invalid bytes with a plain Kafka consumer, which raised
-"Invalid magic byte") - Spark's from_avro() has no equivalent built in.
-Verified empirically before relying on it: from_avro() with option
-"mode": "PERMISSIVE" does NOT reliably flag malformed input as null/error
-- fed deliberately garbage bytes, it silently decoded them into a
-plausible-looking-but-wrong value instead of failing, because Avro's
-binary format has no checksum to validate against and a simple schema can
-make almost any bytes "decode" into something. Messages failing the
-header check are routed to `flights.raw.dlq` directly (skipping
-from_avro entirely) using the same DlqEnvelope schema flights_producer.py
-uses for its own failures - deliberately scoped to only this one failure
-class (no Confluent header at all); a valid header with corrupted payload
-bytes after it would not be caught by this check.
+See README (Spark Structured Streaming, Error Handling, Monitoring) for
+the rationale behind the manual Schema Registry fetch, the magic-byte
+DLQ check, `startingOffsets: latest`, and the consumer-lag tooling gap.
 """
 
 import time
 from pathlib import Path
-
 import clickhouse_connect
 import requests
 from confluent_kafka import SerializingProducer
@@ -133,6 +72,10 @@ def fetch_latest_schema(subject):
 
 
 def write_to_clickhouse(batch_df, batch_id):
+    # collect() pulls the batch to the driver rather than writing per
+    # partition on the executors - fine here since batch_df is already the
+    # aggregated result (a handful of rows per region/window), not raw
+    # events; foreachPartition would be the right call at larger volumes.
     rows = batch_df.collect()
     if not rows:
         return
@@ -200,8 +143,8 @@ def write_bad_to_dlq(batch_df, batch_id):
 class ProgressLogger(StreamingQueryListener):
     """
     Spark's own operational metrics for both queries (throughput, batch
-    duration) - the counterpart to Monitoring's finding that this job is
-    invisible to classic Kafka consumer-lag tooling. Registered once via
+    duration) - the replacement for classic Kafka consumer-lag tooling,
+    which doesn't work here (see README, Monitoring). Registered once via
     spark.streams.addListener(); onQueryProgress fires after every
     completed micro-batch for every active query in this session.
     """
@@ -227,6 +170,10 @@ def main():
     spark.sparkContext.setLogLevel("WARN")
     spark.streams.addListener(ProgressLogger())
 
+    # "latest", not "earliest": from_avro() below decodes against one fixed
+    # schema fetched at startup, and flights.raw holds records written both
+    # before and after the schema last changed - a single schema can't
+    # decode both (see README, Schema Evolution).
     raw = (
         spark.readStream.format("kafka")
         .option("kafka.bootstrap.servers", BOOTSTRAP_SERVERS)
@@ -257,11 +204,11 @@ def main():
     emergency_squawks = spark.createDataFrame(
         EMERGENCY_SQUAWK_CODES, ["squawk", "alert_type"]
     )
-    # Stream-static join: emergency_squawks never changes and isn't read
-    # from Kafka, so this is a plain DataFrame join, not a join between
-    # two streaming sources (Structured Streaming has extra restrictions
-    # for those). Left join so a normal (non-emergency) squawk - the vast
-    # majority - just gets a null alert_type instead of being dropped.
+    # Stream-static join: emergency_squawks is a small in-memory table, not
+    # read from Kafka, so this is an ordinary join - not a stream-stream
+    # join, which Structured Streaming restricts far more heavily. Left
+    # join, since most squawks aren't emergency codes and should just get
+    # a null alert_type rather than being dropped.
     enriched = parsed.join(emergency_squawks, on="squawk", how="left")
 
     # time_position can be null (rare, but the schema allows it) - fall
@@ -312,8 +259,7 @@ def main():
     # Separate streaming query with its own checkpoint - a different query
     # shape (no aggregation) than the windowed one above, so it can't share
     # a checkpoint with it. Runs concurrently with the query above; both
-    # were already started (non-blocking) by the time either await below
-    # runs.
+    # are already started (non-blocking) by the time the await below runs.
     bad.writeStream.foreachBatch(write_bad_to_dlq).outputMode("append").queryName(
         "flights_dlq"
     ).trigger(processingTime=TRIGGER_INTERVAL).option(

@@ -17,23 +17,17 @@ the bounding box (nw/ne/sw/se) and used as the Kafka partition key for
 `flights.raw`.
 
 Every record is also published to `flights.latest`, a compacted topic
-keyed by `icao24` (the aircraft's own transponder ID) - Kafka keeps only
-the most recent message per key there once compaction runs, so it holds
-"the current position of every aircraft" without ever growing unbounded,
-unlike `flights.raw`'s append-only event log. Both topics get the exact
-same record/schema; only the topic and key differ. Reuses the same
-AvroSerializer for both: confluent-kafka derives the Schema Registry
-subject from the topic given to each individual produce() call (the
-default TopicNameStrategy), so writing to a second topic with the same
-value schema just registers a second, independent subject
+keyed by `icao24` - see README, Log Compaction. Reuses the same
+AvroSerializer for both topics: confluent-kafka's default TopicNameStrategy
+derives the Schema Registry subject from the topic passed to each
+produce() call, so the second topic gets its own subject
 (`flights.latest-value`) automatically - no separate serializer needed.
 
 A record that fails Avro serialization (e.g. a required field missing
-because OpenSky's response was incomplete) is routed to the
-`flights.raw.dlq` topic instead of crashing the producer, wrapped in the
-same DlqEnvelope schema (schemas/dlq_envelope.avsc) that
-spark/flights_stream.py uses for its own failures - one consistent shape
-for the DLQ topic, regardless of which stage caught the problem.
+because OpenSky's response was incomplete) is routed to `flights.raw.dlq`
+instead of crashing the producer, wrapped in the same DlqEnvelope schema
+(schemas/dlq_envelope.avsc) that spark/flights_stream.py uses for its own
+failures - see README, Error Handling.
 """
 
 import json
@@ -98,11 +92,8 @@ def fetch_states():
 
 
 def build_producer(schema_registry_client):
-    # AvroSerializer needs the writer schema up front (unlike the read
-    # side, where AvroDeserializer resolves the schema dynamically by ID -
-    # see spark/flights_stream.py's docstring for why Spark can't do that
-    # automatically) and registers it with Schema Registry on first use if
-    # it isn't already registered there.
+    # Registers the schema with Schema Registry automatically on first
+    # use, if it isn't already registered there.
     avro_serializer = AvroSerializer(
         schema_registry_client,
         SCHEMA_PATH.read_text(),
@@ -168,9 +159,9 @@ def main():
 
                 record.pop("sensors", None)  # not part of flight_state.avsc
                 record["region"] = region_for(record["latitude"], record["longitude"])
-                # Schema v2 field (see schemas/flight_state.avsc) - when our
-                # producer processed this record, as opposed to OpenSky's
-                # own last_contact timestamp.
+                # See schemas/flight_state.avsc - when the producer wrote
+                # this record, as opposed to OpenSky's own last_contact
+                # timestamp.
                 record["ingested_at"] = int(time.time() * 1000)
 
                 # SerializingProducer runs `record` through the configured

@@ -22,6 +22,6 @@
     {"name": "position_source", "type": ["null", "int"], "default": null},
     {"name": "category", "type": ["null", "int"], "default": null},
     {"name": "region", "type": "string", "doc": "Derived quadrant of the polled bounding box (nw/ne/sw/se), not part of the raw OpenSky response."},
-    {"name": "ingested_at", "type": ["null", "long"], "default": null, "doc": "Epoch milliseconds when our producer processed this record. Added in schema v2 - nullable with a default so older messages without it remain readable (backward compatibility)."}
+    {"name": "ingested_at", "type": ["null", "long"], "default": null, "doc": "Epoch milliseconds when the producer wrote this record. Nullable with a default so records from before this field existed remain readable (backward compatibility)."}
   ]
 }
