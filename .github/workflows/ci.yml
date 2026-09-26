@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - run: pip install -r requirements.txt -r requirements-dev.txt
+
+      - run: ruff check producer spark scripts tests
+
+      - run: pytest tests/ -v
+
+  compose-and-schema-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history, not just the latest commit - the schema
+          # compatibility check needs to diff against a previous commit.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - run: pip install -r requirements.txt
+
+      # Brings up the full stack and waits for every service's healthcheck
+      # (see docker-compose.yml).
+      - run: docker compose up -d --wait --wait-timeout 180
+
+      - name: Determine base ref for schema comparison
+        id: base_ref
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ] && [ -n "${{ github.event.before }}" ]; then
+            echo "ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=HEAD" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Schema compatibility check
+        env:
+          BASE_REF: ${{ steps.base_ref.outputs.ref }}
+        run: python scripts/check_schema_compatibility.py
+
+      - if: always()
+        run: docker compose down -v

@@ -344,6 +344,6 @@ PySpark needs a JVM - not installed by `pip`:
 - [x] Phase 6 – Enrichment + sink (ClickHouse), idempotent writes
 - [x] Phase 7 – Monitoring: pipeline progress visible via Spark's own
       streaming query metrics (`StreamingQueryListener`)
-- [ ] Phase 8 – CI: lint/tests, schema compatibility check, Docker Compose validation
+- [x] Phase 8 – CI: lint/tests, schema compatibility check, Docker Compose validation
 - [ ] Phase 9 – CD: image build & push to GHCR
 - [ ] Phase 10 – Live map, README/architecture docs, polish
