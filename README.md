@@ -70,8 +70,9 @@ Monitoring: Kafka UI (topics, schemas) + Spark StreamingQueryListener
 - **Kafka** (KRaft mode, `confluentinc/cp-kafka`) – central message broker
 - **Schema Registry** (Confluent, Avro) – schema evolution, compatibility checks
 - **Kafka UI** – inspect topics and schemas visually
-- **Spark Structured Streaming** (open-source PySpark, run locally via
-  `spark-submit`, no managed service) – compute layer for stream processing
+- **Spark Structured Streaming** (open-source PySpark in its own container,
+  `local[*]` mode via `spark-submit`, no managed service) – compute layer
+  for stream processing
 - **ClickHouse** – sink for aggregations (Gold layer, serving for the live map)
 - **GitHub Actions** – CI (tests, schema compatibility checks) and CD
   (Docker image build & push to GHCR)
@@ -137,13 +138,11 @@ mechanism.
 payload, left-joins each event against a small static table of emergency
 squawk codes, and aggregates flight count, average altitude, average
 speed, and emergency-squawk count per region in 1-minute tumbling
-windows, written to ClickHouse (see ClickHouse Sink below). Must run via
-`spark-submit` (not plain `python`) so the Kafka/Avro connector packages
-resolve onto the classpath:
-
-```bash
-spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0,org.apache.spark:spark-avro_2.13:4.2.0 spark/flights_stream.py
-```
+windows, written to ClickHouse (see ClickHouse Sink below). Runs via
+`spark-submit --packages` (not plain `python`) so the Kafka/Avro connector
+JARs resolve onto the classpath - `spark/Dockerfile` downloads them once at
+build time, so a container start doesn't fetch them from Maven Central
+again.
 
 Things worth calling out:
 
@@ -193,8 +192,8 @@ ways:
 - **Incompatible change:** registering a schema with a new *required*
   field (no default) is rejected outright (`HTTP 409`,
   `READER_FIELD_MISSING_DEFAULT_VALUE`) - nothing gets written. This is
-  the same check Phase 8's CI pipeline will run automatically before a
-  merge.
+  the same check CI runs automatically before a merge
+  (`scripts/check_schema_compatibility.py`).
 
 Note: the Schema Registry rejection above only fires when a schema is
 *registered*. If producer code adds a dict key that was never added to the
@@ -294,16 +293,31 @@ docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
 - Schema Registry: [http://localhost:8082](http://localhost:8082)
 - ClickHouse: [http://localhost:8123](http://localhost:8123) (HTTP), `localhost:9000` (native)
 
-Then, in separate terminals, start the producer and the Spark job:
+Then start the producer and the Spark job, each in its own container:
+
+```bash
+docker compose --profile pipeline up -d --build
+docker compose logs -f producer spark
+```
+
+Both sit behind the `pipeline` profile, so a plain `docker compose up`
+(as in the first step, and in CI) starts only the infrastructure - the
+producer spends OpenSky API credits from the moment it runs. Spark UI:
+[http://localhost:4040](http://localhost:4040).
+
+### Running Producer and Spark on the Host
+
+For development, both scripts can also run directly on the host. Their
+connection settings default to the host-side ports and are only overridden
+via environment variables (`KAFKA_BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL`,
+`CLICKHOUSE_HOST`) inside Compose:
 
 ```bash
 python producer/flights_producer.py
 spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0,org.apache.spark:spark-avro_2.13:4.2.0 spark/flights_stream.py
 ```
 
-### Additional Prerequisites for Spark
-
-PySpark needs a JVM - not installed by `pip`:
+PySpark needs a JVM on the host - not installed by `pip`:
 
 - **Java 17** (e.g. [Eclipse Temurin](https://adoptium.net/)), with `JAVA_HOME` pointing at the install directory.
 - **Windows only:** Spark's local filesystem operations go through Hadoop's

@@ -14,6 +14,7 @@ the rationale behind the manual Schema Registry fetch, the magic-byte
 DLQ check, `startingOffsets: latest`, and the consumer-lag tooling gap.
 """
 
+import os
 import time
 from pathlib import Path
 import clickhouse_connect
@@ -45,12 +46,14 @@ EMERGENCY_SQUAWK_CODES = [
     ("7700", "general_emergency"),
 ]
 
-BOOTSTRAP_SERVERS = "localhost:9092"
-SCHEMA_REGISTRY_URL = "http://localhost:8082"
+# Host-side defaults, overridden with in-network addresses by
+# docker-compose.yml - see the same comment in flights_producer.py.
+BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
+SCHEMA_REGISTRY_URL = os.environ.get("SCHEMA_REGISTRY_URL", "http://localhost:8082")
 TOPIC = "flights.raw"
 DLQ_TOPIC = "flights.raw.dlq"
 DLQ_SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schemas" / "dlq_envelope.avsc"
-CLICKHOUSE_HOST = "localhost"
+CLICKHOUSE_HOST = os.environ.get("CLICKHOUSE_HOST", "localhost")
 CLICKHOUSE_PORT = 8123
 CLICKHOUSE_TABLE = "region_traffic"
 CHECKPOINT_LOCATION = "checkpoints/region_traffic"

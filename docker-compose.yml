@@ -138,6 +138,52 @@ services:
       # starting.
       start_period: 30s
 
+  # producer and spark sit behind the "pipeline" profile: a plain
+  # `docker compose up` only starts the infrastructure above (as CI does),
+  # since the producer spends OpenSky API credits from the moment it runs.
+  # Full pipeline: `docker compose --profile pipeline up -d`.
+  #
+  # `image:` next to `build:` - compose builds locally and tags the result
+  # with the GHCR name, or `docker compose pull` fetches the image CI
+  # published there instead (see README, CI/CD Scope).
+  producer:
+    build:
+      context: .
+      dockerfile: producer/Dockerfile
+    image: ghcr.io/alexl-data/kafka-streaming-flight-tracker/producer:latest
+    container_name: producer
+    profiles: [pipeline]
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+    restart: unless-stopped
+
+  spark:
+    build:
+      context: .
+      dockerfile: spark/Dockerfile
+    image: ghcr.io/alexl-data/kafka-streaming-flight-tracker/spark:latest
+    container_name: spark
+    profiles: [pipeline]
+    ports:
+      - "4040:4040"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CLICKHOUSE_HOST: clickhouse
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    # The job reads the flights.raw-value schema at startup, which only
+    # exists once the producer has sent its first event - if spark comes
+    # up first on a fresh stack, it exits and Docker simply restarts it.
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   clickhouse-data:

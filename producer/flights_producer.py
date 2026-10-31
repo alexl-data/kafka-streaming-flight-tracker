@@ -31,6 +31,7 @@ failures - see README, Error Handling.
 """
 
 import json
+import os
 import time
 from pathlib import Path
 
@@ -41,10 +42,14 @@ from confluent_kafka.schema_registry import SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroSerializer
 from confluent_kafka.serialization import StringSerializer
 
-BOOTSTRAP_SERVERS = "localhost:9092"
+# Defaults are the host-side addresses, for running this script directly
+# on the host. Inside Docker Compose, "localhost" would be the producer's
+# own container - docker-compose.yml overrides both with the in-network
+# addresses (kafka:29092, schema-registry:8081) instead.
+BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092")
 # Host-side port for Schema Registry - see the port comment in
 # docker-compose.yml for why it's 8082 instead of the 8081 default.
-SCHEMA_REGISTRY_URL = "http://localhost:8082"
+SCHEMA_REGISTRY_URL = os.environ.get("SCHEMA_REGISTRY_URL", "http://localhost:8082")
 TOPIC = "flights.raw"
 LATEST_TOPIC = "flights.latest"
 DLQ_TOPIC = "flights.raw.dlq"

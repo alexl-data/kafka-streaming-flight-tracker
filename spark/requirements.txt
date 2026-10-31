@@ -1,0 +1,4 @@
+pyspark==4.2.0
+confluent-kafka[avro]==2.15.0
+requests==2.34.2
+clickhouse-connect==1.8.0

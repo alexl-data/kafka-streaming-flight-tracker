@@ -1,4 +1,4 @@
-confluent-kafka[avro]==2.15.0
-requests==2.34.2
-pyspark==4.2.0
-clickhouse-connect==1.8.0
+# Per-component dependencies, so each Docker image only installs what it
+# needs - this file pulls in both for running everything from one venv.
+-r producer/requirements.txt
+-r spark/requirements.txt
