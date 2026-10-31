@@ -20,4 +20,11 @@ RUN pip install --no-cache-dir -r producer/requirements.txt
 COPY schemas/ schemas/
 COPY producer/flights_producer.py producer/
 
+# `docker stop` normally sends SIGTERM, which Python ignores when it's the
+# container's main process - Docker would then force-kill it after 10s,
+# losing events still buffered in the producer. SIGINT is the same signal
+# as Ctrl+C: Python turns it into KeyboardInterrupt, so the producer's
+# finally block still flushes before exiting.
+STOPSIGNAL SIGINT
+
 CMD ["python", "producer/flights_producer.py"]
