@@ -86,6 +86,25 @@ Registry on every merge to `main`, plus a documented (not continuously
 operated) deploy step. This demonstrates CI/CD craftsmanship without
 incurring permanent infrastructure cost for a demo.
 
+CI and CD are separate workflows. `.github/workflows/cd.yml` is triggered
+by `ci.yml` finishing (`workflow_run`), and only publishes if CI passed
+for a push to `main` - building from the exact commit CI tested. It builds the producer and Spark images and pushes each with two
+tags: `latest`, which `docker-compose.yml` references, and the commit SHA,
+which ties every published image to the exact commit it was built from
+(and allows rolling back to it).
+
+Deploy step - on any host with Docker, without building anything:
+
+```bash
+docker login ghcr.io          # only needed while the packages are private
+docker compose --profile pipeline pull
+docker compose --profile pipeline up -d --no-build
+```
+
+`--no-build` makes Compose use the pulled images instead of rebuilding
+them from the Dockerfiles. Topics and the ClickHouse table still need to
+be created once, as in Setup below.
+
 ## Cost / Latency Trade-offs
 
 Several settings already introduced above are, at their core, the same
@@ -141,8 +160,7 @@ speed, and emergency-squawk count per region in 1-minute tumbling
 windows, written to ClickHouse (see ClickHouse Sink below). Runs via
 `spark-submit --packages` (not plain `python`) so the Kafka/Avro connector
 JARs resolve onto the classpath - `spark/Dockerfile` downloads them once at
-build time, so a container start doesn't fetch them from Maven Central
-again.
+build time, so a container start doesn't fetch them again.
 
 Things worth calling out:
 
@@ -359,5 +377,5 @@ PySpark needs a JVM on the host - not installed by `pip`:
 - [x] Phase 7 – Monitoring: pipeline progress visible via Spark's own
       streaming query metrics (`StreamingQueryListener`)
 - [x] Phase 8 – CI: lint/tests, schema compatibility check, Docker Compose validation
-- [ ] Phase 9 – CD: image build & push to GHCR
+- [x] Phase 9 – CD: image build & push to GHCR
 - [ ] Phase 10 – Live map, README/architecture docs, polish

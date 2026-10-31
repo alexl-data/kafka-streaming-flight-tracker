@@ -1,0 +1,52 @@
+name: CD
+
+# Runs after the CI workflow (ci.yml) finishes on main, instead of on the
+# push itself - so images are only built from code CI already checked.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  publish-images:
+    # "completed" fires whether CI passed or failed - only publish if it
+    # passed, and only for pushes to main (CI also runs on pull requests).
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets the built-in GITHUB_TOKEN push to this repo's GHCR packages -
+      # no separate access token or secret needed.
+      packages: write
+    strategy:
+      # Same steps for both images, run as two parallel jobs.
+      matrix:
+        component: [producer, spark]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The exact commit CI tested - by default, checkout would take
+          # whatever main points to now, which could already be a newer,
+          # untested commit if someone pushed again in the meantime.
+          ref: ${{ github.event.workflow_run.head_sha }}
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          # Same build settings as docker-compose.yml: repo root as context.
+          context: .
+          file: ${{ matrix.component }}/Dockerfile
+          push: true
+          # latest = what docker-compose.yml pulls; the commit SHA tag ties
+          # every published image to the exact commit it was built from.
+          tags: |
+            ghcr.io/${{ github.repository }}/${{ matrix.component }}:latest
+            ghcr.io/${{ github.repository }}/${{ matrix.component }}:${{ github.event.workflow_run.head_sha }}
