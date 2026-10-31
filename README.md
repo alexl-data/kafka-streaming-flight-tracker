@@ -5,6 +5,25 @@ the central message broker, Spark Structured Streaming as the processing
 layer, Schema Registry for Avro-based schema evolution, and ClickHouse as
 the analytics sink.
 
+![Live map: current aircraft positions from flights.latest, aircraft per region from ClickHouse](docs/live_map.png)
+
+## Quickstart
+
+Requires only Docker:
+
+```bash
+git clone https://github.com/alexl-data/kafka-streaming-flight-tracker.git
+cd kafka-streaming-flight-tracker
+docker compose up -d                              # infrastructure
+# create the topics and the ClickHouse table once - see Setup below
+docker compose --profile pipeline up -d --build   # producer, Spark, live map
+```
+
+Then open the live map at [http://localhost:5000](http://localhost:5000).
+The producer uses OpenSky's anonymous daily quota, which a continuously
+running producer exhausts within a few hours - stop everything with
+`docker compose --profile pipeline stop` when you're done.
+
 ## Data Source
 
 [OpenSky Network](https://opensky-network.org/) state vector API (REST,
@@ -390,27 +409,3 @@ PySpark needs a JVM on the host - not installed by `pip`:
   the same underlying reason, also set `PYSPARK_PYTHON` and
   `PYSPARK_DRIVER_PYTHON` to the venv's `python.exe` so the job itself
   doesn't hit the same stub once it's actually running.
-
-## Roadmap / Commit Phases
-
-- [x] Phase 0 – Repo scaffold, Kafka (KRaft) + Kafka UI via Docker Compose
-- [x] Phase 1 – Kafka fundamentals: explicit topic creation with
-      partitioning against the real `flights.raw` topic (an earlier
-      version of this phase used standalone demo scripts and a separate
-      `demo.events` topic to also show consumer-group rebalancing - later
-      removed to keep the repo scoped to the real pipeline only; see git
-      history)
-- [x] Phase 2a – Live data source: OpenSky Network producer (DACH bounding box)
-- [x] Phase 2b – Schema Registry + Avro serialization for the real pipeline
-- [x] Phase 2c – First schema evolution
-- [x] Phase 3 – Error handling: dead-letter topic
-- [x] Phase 4 – Spark Structured Streaming: Kafka source, Avro
-      deserialization, checkpointing
-- [x] Phase 5 – Windowing/watermarking: tumbling window aggregation,
-      handling late events
-- [x] Phase 6 – Enrichment + sink (ClickHouse), idempotent writes
-- [x] Phase 7 – Monitoring: pipeline progress visible via Spark's own
-      streaming query metrics (`StreamingQueryListener`)
-- [x] Phase 8 – CI: lint/tests, schema compatibility check, Docker Compose validation
-- [x] Phase 9 – CD: image build & push to GHCR
-- [ ] Phase 10 – Live map, README/architecture docs, polish
