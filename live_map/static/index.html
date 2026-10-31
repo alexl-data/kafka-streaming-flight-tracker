@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Live Flight Map</title>
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+  <style>
+    body { margin: 0; font-family: system-ui, sans-serif; display: flex; height: 100vh; }
+    #map { flex: 1; }
+    #side { width: 340px; padding: 16px; overflow-y: auto; box-sizing: border-box; }
+    h1 { font-size: 18px; margin: 0 0 4px; }
+    h2 { font-size: 15px; margin: 20px 0 4px; }
+    .muted { color: #666; font-size: 13px; margin: 0; }
+    table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    th, td { padding: 4px 6px; text-align: right; border-bottom: 1px solid #ddd; }
+    th:first-child, td:first-child { text-align: left; }
+    @media (max-width: 700px) {
+      body { flex-direction: column; }
+      #map { height: 60vh; flex: none; }
+      #side { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <div id="side">
+    <h1>Live Flight Map (DACH)</h1>
+    <p class="muted" id="status">Loading...</p>
+
+    <h2>Aircraft per region</h2>
+    <p class="muted">1-minute windows from ClickHouse (Gold layer)</p>
+    <table id="regions"></table>
+  </div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+  <script>
+    // Same as the producer's poll interval - refreshing faster than new
+    // data can arrive would only repeat the same request.
+    const REFRESH_MS = 15000;
+    const EMERGENCY_SQUAWKS = ["7500", "7600", "7700"];
+    const REGIONS = ["nw", "ne", "sw", "se"];
+
+    const map = L.map("map").setView([50.5, 11.5], 6);
+    L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      maxZoom: 18,
+      attribution: "&copy; OpenStreetMap contributors",
+    }).addTo(map);
+    const markers = L.layerGroup().addTo(map);
+
+    function fmt(value, digits = 0) {
+      return value == null ? "-" : value.toFixed(digits);
+    }
+
+    async function loadFlights() {
+      const flights = await (await fetch("/api/flights")).json();
+      markers.clearLayers();
+      for (const f of flights) {
+        const emergency = EMERGENCY_SQUAWKS.includes(f.squawk);
+        L.circleMarker([f.latitude, f.longitude], {
+          radius: emergency ? 7 : 4,
+          color: emergency ? "#d00" : (f.on_ground ? "#888" : "#1f6feb"),
+          weight: 1,
+          fillOpacity: 0.8,
+        })
+          .bindPopup(
+            `<b>${f.callsign || f.icao24}</b><br>` +
+            `${f.origin_country}<br>` +
+            `Altitude: ${fmt(f.altitude_m)} m<br>` +
+            `Speed: ${fmt(f.velocity_kmh)} km/h` +
+            (emergency ? `<br><b>Squawk ${f.squawk}</b>` : "")
+          )
+          .addTo(markers);
+      }
+      document.getElementById("status").textContent =
+        `${flights.length} aircraft - updated ${new Date().toLocaleTimeString()}`;
+    }
+
+    async function loadRegions() {
+      const rows = await (await fetch("/api/regions")).json();
+      // Pivot: one table row per window, one column per region.
+      const byWindow = new Map();
+      for (const r of rows) {
+        if (!byWindow.has(r.window_start)) byWindow.set(r.window_start, {});
+        byWindow.get(r.window_start)[r.region] = r.flight_count;
+      }
+      let html = "<tr><th>Window (UTC)</th>" + REGIONS.map(r => `<th>${r}</th>`).join("") + "</tr>";
+      for (const [windowStart, counts] of byWindow) {
+        const time = windowStart.slice(11, 16);
+        html += `<tr><td>${time}</td>` + REGIONS.map(r => `<td>${counts[r] ?? "-"}</td>`).join("") + "</tr>";
+      }
+      document.getElementById("regions").innerHTML = html;
+    }
+
+    async function refresh() {
+      try {
+        await Promise.all([loadFlights(), loadRegions()]);
+      } catch (err) {
+        document.getElementById("status").textContent = `Update failed: ${err}`;
+      }
+    }
+
+    refresh();
+    setInterval(refresh, REFRESH_MS);
+  </script>
+</body>
+</html>

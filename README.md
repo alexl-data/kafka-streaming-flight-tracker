@@ -47,7 +47,8 @@ Spark Structured Streaming                        │
    Sink: ClickHouse (Gold: region_traffic, idempotent via ReplacingMergeTree)
         │
         ▼
-   Live map (small web app, consumes flights.latest / Gold aggregates)
+   Live map (Flask + Leaflet): current positions from flights.latest,
+   per-region history from region_traffic
 
 Monitoring: Kafka UI (topics, schemas) + Spark StreamingQueryListener
   (query progress — Spark's Kafka source doesn't commit offsets, so it
@@ -74,6 +75,8 @@ Monitoring: Kafka UI (topics, schemas) + Spark StreamingQueryListener
   `local[*]` mode via `spark-submit`, no managed service) – compute layer
   for stream processing
 - **ClickHouse** – sink for aggregations (Gold layer, serving for the live map)
+- **Flask + Leaflet** – live map web app (Python backend, OpenStreetMap
+  map in the browser)
 - **GitHub Actions** – CI (tests, schema compatibility checks) and CD
   (Docker image build & push to GHCR)
 
@@ -88,7 +91,8 @@ incurring permanent infrastructure cost for a demo.
 
 CI and CD are separate workflows. `.github/workflows/cd.yml` is triggered
 by `ci.yml` finishing (`workflow_run`), and only publishes if CI passed
-for a push to `main` - building from the exact commit CI tested. It builds the producer and Spark images and pushes each with two
+for a push to `main` - building from the exact commit CI tested. It
+builds the producer, Spark and live map images and pushes each with two
 tags: `latest`, which `docker-compose.yml` references, and the commit SHA,
 which ties every published image to the exact commit it was built from
 (and allows rolling back to it).
@@ -96,7 +100,6 @@ which ties every published image to the exact commit it was built from
 Deploy step - on any host with Docker, without building anything:
 
 ```bash
-docker login ghcr.io          # only needed while the packages are private
 docker compose --profile pipeline pull
 docker compose --profile pipeline up -d --no-build
 ```
@@ -195,6 +198,28 @@ versions of the same `(window_start, region)` - visible directly with a
 plain `SELECT`. Querying with `SELECT ... FROM region_traffic FINAL`
 collapses that down to one row per key, keeping only the highest
 `updated_at`.
+
+## Live Map
+
+`live_map/app.py` (Flask) serves a map of every aircraft's current
+position next to a table of aircraft per region over the last 10 minutes
+([http://localhost:5000](http://localhost:5000), refreshes every 15s). It
+reads from both ends of the pipeline, because they answer different
+questions:
+
+- **Where is every aircraft right now? → `flights.latest`.** A background
+  thread reads the compacted topic from the beginning and keeps the latest
+  record per `icao24` in memory. It starts with a fresh consumer group id
+  and never commits offsets, so every start rebuilds the full current
+  state instead of resuming where a previous run stopped.
+- **How did traffic develop over time? → ClickHouse `region_traffic`.**
+  The Gold-layer aggregates Spark writes, queried with `FINAL` (see
+  ClickHouse Sink). Kafka can't answer this one: `flights.latest` keeps no
+  history, and `flights.raw` is deleted after its retention period.
+
+Compaction never deletes a key's latest record, so `flights.latest` still
+holds aircraft that landed or left the region hours ago. The map only
+shows aircraft whose `last_contact` is at most 2 minutes old.
 
 ## Schema Evolution
 
@@ -311,21 +336,24 @@ docker exec kafka kafka-topics --bootstrap-server localhost:9092 \
 - Schema Registry: [http://localhost:8082](http://localhost:8082)
 - ClickHouse: [http://localhost:8123](http://localhost:8123) (HTTP), `localhost:9000` (native)
 
-Then start the producer and the Spark job, each in its own container:
+Then start the producer, the Spark job and the live map, each in its own
+container:
 
 ```bash
 docker compose --profile pipeline up -d --build
-docker compose logs -f producer spark
+docker compose logs -f producer spark live-map
 ```
 
-Both sit behind the `pipeline` profile, so a plain `docker compose up`
+All three sit behind the `pipeline` profile, so a plain `docker compose up`
 (as in the first step, and in CI) starts only the infrastructure - the
-producer spends OpenSky API credits from the moment it runs. Spark UI:
-[http://localhost:4040](http://localhost:4040).
+producer spends OpenSky API credits from the moment it runs.
 
-### Running Producer and Spark on the Host
+- Live map: [http://localhost:5000](http://localhost:5000)
+- Spark UI: [http://localhost:4040](http://localhost:4040)
 
-For development, both scripts can also run directly on the host. Their
+### Running Producer, Spark and the Live Map on the Host
+
+For development, all three can also run directly on the host. Their
 connection settings default to the host-side ports and are only overridden
 via environment variables (`KAFKA_BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL`,
 `CLICKHOUSE_HOST`) inside Compose:
@@ -333,6 +361,7 @@ via environment variables (`KAFKA_BOOTSTRAP_SERVERS`, `SCHEMA_REGISTRY_URL`,
 ```bash
 python producer/flights_producer.py
 spark-submit --packages org.apache.spark:spark-sql-kafka-0-10_2.13:4.2.0,org.apache.spark:spark-avro_2.13:4.2.0 spark/flights_stream.py
+python live_map/app.py
 ```
 
 PySpark needs a JVM on the host - not installed by `pip`:

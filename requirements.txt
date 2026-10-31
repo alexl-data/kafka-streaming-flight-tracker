@@ -1,4 +1,5 @@
 # Per-component dependencies, so each Docker image only installs what it
-# needs - this file pulls in both for running everything from one venv.
+# needs - this file pulls in all of them for running everything from one venv.
 -r producer/requirements.txt
 -r spark/requirements.txt
+-r live_map/requirements.txt

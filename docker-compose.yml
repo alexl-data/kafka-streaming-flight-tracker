@@ -184,6 +184,26 @@ services:
     # up first on a fresh stack, it exits and Docker simply restarts it.
     restart: unless-stopped
 
+  live-map:
+    build:
+      context: .
+      dockerfile: live_map/Dockerfile
+    image: ghcr.io/alexl-data/kafka-streaming-flight-tracker/live_map:latest
+    container_name: live-map
+    profiles: [pipeline]
+    ports:
+      - "5000:5000"
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CLICKHOUSE_HOST: clickhouse
+    depends_on:
+      schema-registry:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+    restart: unless-stopped
+
 volumes:
   kafka-data:
   clickhouse-data:

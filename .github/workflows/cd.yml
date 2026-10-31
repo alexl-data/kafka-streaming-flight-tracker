@@ -22,9 +22,9 @@ jobs:
       # no separate access token or secret needed.
       packages: write
     strategy:
-      # Same steps for both images, run as two parallel jobs.
+      # Same steps for every image, run as one parallel job per image.
       matrix:
-        component: [producer, spark]
+        component: [producer, spark, live_map]
     steps:
       - uses: actions/checkout@v4
         with:
