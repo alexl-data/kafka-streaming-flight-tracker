@@ -25,6 +25,7 @@ from confluent_kafka.schema_registry.avro import AvroSerializer
 from pyspark.sql import SparkSession
 from pyspark.sql.avro.functions import from_avro
 from pyspark.sql.functions import (
+    approx_count_distinct,
     avg,
     coalesce,
     col,
@@ -224,7 +225,13 @@ def main():
     windowed = (
         events.groupBy(window(col("event_time"), WINDOW_DURATION), col("region"))
         .agg(
-            count("*").alias("flight_count"),
+            # Distinct aircraft, not rows: the producer reports every
+            # aircraft once per 15s poll, so count("*") would count each
+            # one about four times per 1-minute window. An exact
+            # countDistinct isn't supported in streaming aggregations -
+            # approx_count_distinct estimates it (HyperLogLog, ~5% max
+            # error by default) without keeping every icao24 in state.
+            approx_count_distinct("icao24").alias("flight_count"),
             avg("baro_altitude").alias("avg_altitude_m"),
             # Enrichment: OpenSky reports velocity in m/s: convert to
             # km/h, the more common unit for a "traffic" style view.

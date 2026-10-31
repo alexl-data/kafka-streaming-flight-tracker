@@ -39,7 +39,7 @@ Spark Structured Streaming                        │
   ├─ Magic-byte check on flights.raw ──(malformed)┘
   ├─ Avro deserialization (schema fetched from the registry via REST)
   ├─ Stream-static join against emergency squawk codes
-  ├─ Tumbling window aggregation + watermark (flight count/altitude/speed/
+  ├─ Tumbling window aggregation + watermark (distinct aircraft/altitude/speed/
   │  emergency count per region and time window, handling late events)
   └─ Checkpointing (exactly-once on the read side)
         │
@@ -158,8 +158,8 @@ mechanism.
 
 `spark/flights_stream.py` reads `flights.raw`, deserializes the Avro
 payload, left-joins each event against a small static table of emergency
-squawk codes, and aggregates flight count, average altitude, average
-speed, and emergency-squawk count per region in 1-minute tumbling
+squawk codes, and aggregates the number of distinct aircraft, average
+altitude, average speed, and emergency-squawk count per region in 1-minute tumbling
 windows, written to ClickHouse (see ClickHouse Sink below). Runs via
 `spark-submit --packages` (not plain `python`) so the Kafka/Avro connector
 JARs resolve onto the classpath - `spark/Dockerfile` downloads them once at
@@ -182,6 +182,12 @@ Things worth calling out:
   `spark.createDataFrame()`, not read from Kafka, so joining it against
   the streaming DataFrame is an ordinary join rather than a stream-stream
   join (which Structured Streaming restricts more heavily).
+- **Approximate distinct count.** Every aircraft is reported once per
+  15-second poll, so a plain `count("*")` per 1-minute window counts each
+  aircraft about four times. Exact `countDistinct` isn't supported in
+  streaming aggregations, so `flight_count` uses `approx_count_distinct`
+  on `icao24` (HyperLogLog, ~5% maximum error by default) - an estimate
+  that doesn't need to keep every `icao24` of a window in state.
 
 ## ClickHouse Sink
 
